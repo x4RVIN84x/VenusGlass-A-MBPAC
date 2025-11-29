@@ -1,0 +1,19 @@
+{
+    "golden_image_path": "E:\\ARVIN\\A-MBPAC\\images\\check_207_R1\\IMG-20250807-WA0005.jpg",
+    "roi": [
+        55,
+        338,
+        220,
+        283
+    ],
+    "expected_center": [
+        161,
+        475
+    ],
+    "expected_angle": 0.0,
+    "tolerance_px": {
+        "x": 10,
+        "y": 10,
+        "angle": 5
+    }
+}
