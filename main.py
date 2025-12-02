@@ -2,20 +2,22 @@
 import json
 import os
 import cv2
+import numpy as np  # Needed for contour coordinate shifts
 
-from detector import load_and_crop, detect_baseplate
+from detector import load_and_crop, detect_baseplate, detect_glass_contour
 from compare_to_golden import compare_to_golden, overlay_reference_and_test
 from auto_run import run_batch  # <- batch runner defined below
+import roi_stablizer
 
 # =========================
 # EDITABLE FLAGS (no CLI)
 # =========================
-AUTO_MODE       = True          # True = process all images in INCOMING_DIR
+AUTO_MODE       = False          # True = process all images in INCOMING_DIR
 SHOW_OVERLAY    = True          # Show overlay windows (single + batch)
 AUTO_CLOSE_SEC  = 2.0           # Auto-close overlay in batch mode (seconds)
 
 CONFIG_PATH     = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_config.json"
-TEST_IMAGE_PATH = r"E:\ARVIN\A-MBPAC\images\check_207_R1\angle_adjusted.jpg"
+TEST_IMAGE_PATH = r"E:\ARVIN\A-MBPAC\images\check_207_R1\test207R2.jpg"
 
 INCOMING_DIR    = r"E:\ARVIN\A-MBPAC\incoming"
 OUTPUT_ROOT     = r"E:\ARVIN\A-MBPAC\glass_data"
@@ -36,12 +38,31 @@ def run_single(config_path: str, test_image_path: str, show_overlay: bool = True
     golden_img_path = cfg["golden_image_path"]
     px_to_mm = cfg.get("px_to_mm", {}).get("uniform")
 
-    # test image
-    try:
-        cropped_test, full_test_img = load_and_crop(test_image_path, roi)
-    except ValueError as e:
-        print(e)
+    # Load full test image
+    full_test_img = cv2.imread(test_image_path)
+    if full_test_img is None:
+        print(f"❌ Failed to load test image: {test_image_path}")
         return
+
+    # ========== NEW: Detect full glass contour ==========
+    glass_contour = detect_glass_contour(full_test_img)
+    if glass_contour is None:
+        print("❌ Could not detect glass outer contour in test image.")
+        # Fallback: use ROI from config as before
+        cropped_test, _ = load_and_crop(test_image_path, roi)
+        roi_for_detection = roi
+    else:
+        # Get bounding box of detected glass contour
+        x, y, w, h = cv2.boundingRect(glass_contour)
+        pad = 20  # optional padding
+        H, W = full_test_img.shape[:2]
+        x_pad = max(0, x - pad)
+        y_pad = max(0, y - pad)
+        w_pad = min(w + 2 * pad, W - x_pad)
+        h_pad = min(h + 2 * pad, H - y_pad)
+        cropped_test = full_test_img[y_pad:y_pad+h_pad, x_pad:x_pad+w_pad]
+        roi_for_detection = [x_pad, y_pad, w_pad, h_pad]
+    # ===================================================
 
     # golden image (only to get golden contour for drawing)
     golden_img = cv2.imread(golden_img_path)
@@ -49,9 +70,11 @@ def run_single(config_path: str, test_image_path: str, show_overlay: bool = True
         print(f"❌ Could not load golden reference image: {golden_img_path}")
         return
 
-    # detect on test
+    # detect baseplate on test image (using glass contour ROI if detected)
     test_center, test_angle, test_contour = detect_baseplate(
-        cropped_test, full_image=full_test_img, roi=roi
+        cropped_test,
+        full_image=full_test_img,
+        roi=roi_for_detection
     )
     if test_center is None:
         print("❌ No baseplate detected in test image.")

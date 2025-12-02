@@ -220,3 +220,51 @@ def detect_baseplate(
             return center_rel, ang, cnt_rel
 
     return None, None, None
+
+
+def detect_glass_contour(
+        image,
+        min_area_frac=0.3,
+        max_area_frac=1.0,
+        canny_low=50,
+        canny_high=150,
+        border_margin=10,
+):
+    """
+    Detect the full outer contour of the glass in the image.
+
+    Returns:
+        contour (numpy array) of the largest plausible glass contour, or None if not found.
+    """
+    if image is None or image.size == 0:
+        return None
+
+    H, W = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.bilateralFilter(gray, d=5, sigmaColor=40, sigmaSpace=40)
+    gray = cv2.equalizeHist(gray)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    edges = cv2.Canny(blurred, canny_low, canny_high)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    win_area = W * H
+    candidates = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        # Ignore contours touching image borders (likely noise)
+        if x <= border_margin or y <= border_margin or x + w >= W - border_margin or y + h >= H - border_margin:
+            continue
+        area = cv2.contourArea(c)
+        if min_area_frac * win_area <= area <= max_area_frac * win_area:
+            candidates.append(c)
+
+    if not candidates:
+        return None
+
+    # Return the largest contour by area (likely the glass)
+    glass_contour = max(candidates, key=cv2.contourArea)
+    return glass_contour
