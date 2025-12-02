@@ -6,7 +6,7 @@ import numpy as np
 # ------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------
-CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_config.json"  # << change if needed
+CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"  # << change if needed
 
 # detection knobs (aligned with detector.py)
 SHRINK_BORDER_PX = 10
