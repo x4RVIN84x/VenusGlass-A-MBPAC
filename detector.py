@@ -27,7 +27,8 @@ def _preprocess_edges(bgr, canny_low, canny_high):
     gray = cv2.bilateralFilter(gray, d=5, sigmaColor=40, sigmaSpace=40)
     gray = cv2.equalizeHist(gray)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, canny_low, canny_high)
+    # use dynamic thresholds
+    edges = cv2.Canny(blurred, canny_low, canny_high, apertureSize=3, L2gradient=True)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
     return gray, edges
@@ -58,9 +59,11 @@ def _pick_best_contour(gray, contours, W, H,
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
 
-        if x <= border_margin or y <= border_margin or \
-           x + w >= W - border_margin or y + h >= H - border_margin:
-            continue
+        # Optional border rejection (skip if border_margin is None)
+        if border_margin is not None:
+            if x <= border_margin or y <= border_margin or \
+               x + w >= W - border_margin or y + h >= H - border_margin:
+                continue
 
         area = cv2.contourArea(c)
         if area < area_min_frac * win_area or area > area_max_frac * win_area:
@@ -102,7 +105,7 @@ def _detect_in_window(bgr,
                       border_margin, contrast_min,
                       shrink_border_px):
     """
-    Return (center_xy, angle, contour) in window coords, or (None,..)
+    Return (center_xy, angle, contour) in window coords, or (None, ..)
     """
     if bgr is None or bgr.size == 0:
         return None, None, None
@@ -228,13 +231,14 @@ def detect_glass_contour(
         max_area_frac=1.0,
         canny_low=50,
         canny_high=150,
-        border_margin=10,
+        border_margin=None,
 ):
     """
     Detect the full outer contour of the glass in the image.
 
     Returns:
         contour (numpy array) of the largest plausible glass contour, or None if not found.
+        Contour is in full-image coordinates.
     """
     if image is None or image.size == 0:
         return None
@@ -245,7 +249,8 @@ def detect_glass_contour(
     gray = cv2.equalizeHist(gray)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    edges = cv2.Canny(blurred, canny_low, canny_high)
+    # dynamic Canny with accurate gradients for smooth edges
+    edges = cv2.Canny(blurred, canny_low, canny_high, apertureSize=3, L2gradient=True)
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
     edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
 
@@ -255,9 +260,12 @@ def detect_glass_contour(
     candidates = []
     for c in contours:
         x, y, w, h = cv2.boundingRect(c)
-        # Ignore contours touching image borders (likely noise)
-        if x <= border_margin or y <= border_margin or x + w >= W - border_margin or y + h >= H - border_margin:
-            continue
+
+        # Optional: ignore contours touching image borders (likely noise)
+        if border_margin is not None:
+            if x <= border_margin or y <= border_margin or x + w >= W - border_margin or y + h >= H - border_margin:
+                continue
+
         area = cv2.contourArea(c)
         if min_area_frac * win_area <= area <= max_area_frac * win_area:
             candidates.append(c)
