@@ -1,14 +1,16 @@
+# roi_calibration.py
 import cv2
 import json
 import os
 import numpy as np
+import detector  # uses detect_baseplate and detect_glass_contour from your updated detector.py
 
 # ------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------
-CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"  # << change if needed
+CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"  # change if needed
 
-# detection knobs (aligned with detector.py)
+# Detection knobs (aligned with original calibrator + detector.py)
 SHRINK_BORDER_PX = 10
 PADDING_PX = 30
 BORDER_MARGIN = 12
@@ -23,20 +25,25 @@ EXTENT_MIN   = 0.25
 CONTRAST_MIN = 12.0
 
 # ------------------------------------------------------------
-# Mouse globals
+# Mouse + UI globals
 # ------------------------------------------------------------
 roi_start = None
 roi_end = None
 drawing = False
 roi_done = False
 
-center_abs = None
-chosen_cnt = None
+center_abs = None        # baseplate center in absolute image coords
+chosen_cnt = None        # baseplate contour (absolute coords)
 chosen_angle = 0.0
 status_text = ""
 
+# Cached glass info for visualization
+glass_contour = None     # absolute coords
+glass_center = None      # absolute coords (bbox center)
+
 
 def draw_roi(event, x, y, flags, param):
+    """Standard rectangle drawing for ROI selection."""
     global roi_start, roi_end, drawing, roi_done
     if event == cv2.EVENT_LBUTTONDOWN and not roi_done:
         roi_start = (x, y)
@@ -50,6 +57,9 @@ def draw_roi(event, x, y, flags, param):
         roi_done = True
 
 
+# ------------------------------------------------------------
+# Original calibrator helpers (kept intact)
+# ------------------------------------------------------------
 def _contrast_score(gray, cnt):
     mask = np.zeros(gray.shape[:2], np.uint8)
     cv2.drawContours(mask, [cnt], -1, 255, thickness=-1)
@@ -87,7 +97,7 @@ def _filter_and_score_contours(gray, W, H, contours):
         if solidity < SOLIDITY_MIN:
             continue
 
-        extent = area / float(w * h)
+        extent = area / float(max(1, w * h))
         if extent < EXTENT_MIN:
             continue
 
@@ -149,12 +159,36 @@ def _detect_in_roi(image, roi):
     return (cx_abs, cy_abs), float(round(angle, 2)), best_off, True
 
 
+# ------------------------------------------------------------
+# Glass detection (cached once for the golden sample)
+# ------------------------------------------------------------
+def _detect_glass_once(img):
+    """Detect and cache the glass contour and center for the golden sample."""
+    global glass_contour, glass_center
+    # Call detector's glass detection with only supported args
+    glass_contour = detector.detect_glass_contour(
+        img,
+        canny_low=CANNY_LOW,
+        canny_high=CANNY_HIGH,
+        border_margin=None  # full-glass often touches edges
+    )
+    if glass_contour is not None and len(glass_contour) > 0:
+        gx, gy, gw, gh = cv2.boundingRect(glass_contour)
+        glass_center = (gx + gw // 2, gy + gh // 2)
+    else:
+        glass_center = None
+
+
 def main():
     global center_abs, chosen_cnt, chosen_angle, status_text, roi_start, roi_end, roi_done
 
     # load config & image
+    if not os.path.exists(CONFIG_PATH):
+        print("❌ Config not found:", CONFIG_PATH)
+        return
     with open(CONFIG_PATH, "r") as f:
         cfg = json.load(f)
+
     img_path = cfg.get("golden_image_path")
     if not img_path:
         print("❌ 'golden_image_path' missing in config.")
@@ -164,6 +198,9 @@ def main():
         print("❌ Image not found. Check path:", img_path)
         return
 
+    # Detect full-glass once for visualization and saving
+    _detect_glass_once(img)
+
     clone = img.copy()
     cv2.namedWindow("Calibrator")
     cv2.setMouseCallback("Calibrator", draw_roi)
@@ -171,9 +208,11 @@ def main():
     while True:
         temp = clone.copy()
 
+        # Live ROI rectangle while dragging
         if roi_start and roi_end:
             cv2.rectangle(temp, roi_start, roi_end, (0, 255, 0), 2)
 
+        # When ROI is finalized, detect baseplate inside it (single pass)
         if roi_done and center_abs is None:
             x0, y0 = roi_start
             x1, y1 = roi_end
@@ -183,13 +222,13 @@ def main():
             roi_h = abs(y1 - y0)
             roi_box = [roi_x, roi_y, roi_w, roi_h]
 
-            # main pass
+            # Use original calibrator detection path to maintain behavior
             c_abs, ang, cnt_abs, ok = _detect_in_roi(img, roi_box)
             if ok:
                 status_text = "Main ROI used"
                 center_abs, chosen_angle, chosen_cnt = c_abs, ang, cnt_abs
             else:
-                # padded pass
+                # padded pass (original behavior)
                 H, W = img.shape[:2]
                 x_pad = max(0, roi_x - PADDING_PX)
                 y_pad = max(0, roi_y - PADDING_PX)
@@ -202,19 +241,30 @@ def main():
                     status_text = f"Padded ROI used (+{PADDING_PX}px)"
                     center_abs, chosen_angle, chosen_cnt = c_abs, ang, cnt_abs
                 else:
-                    status_text = "Fallback: using ROI center"
+                    status_text = "Fallback using ROI center"
                     center_abs = (roi_x + roi_w // 2, roi_y + roi_h // 2)
                     chosen_angle = 0.0
                     chosen_cnt = None
 
+        # Draw baseplate center + crosshairs
         if center_abs is not None:
             cv2.circle(temp, center_abs, 5, (0, 0, 255), -1)
             cv2.line(temp, (center_abs[0], 0), (center_abs[0], temp.shape[0]), (0, 255, 255), 1)
             cv2.line(temp, (0, center_abs[1]), (temp.shape[1], center_abs[1]), (0, 255, 255), 1)
 
-        if chosen_cnt is not None:
+        # Draw detected baseplate contour
+        if chosen_cnt is not None and len(chosen_cnt) > 0:
             cv2.drawContours(temp, [chosen_cnt], -1, (0, 255, 0), 2)
 
+        # Draw glass contour + center (for confirmation)
+        if glass_contour is not None and len(glass_contour) > 0:
+            cv2.drawContours(temp, [glass_contour], -1, (255, 0, 0), 2)  # blue
+            if glass_center is not None:
+                cv2.circle(temp, glass_center, 5, (0, 255, 0), -1)       # green
+                cv2.putText(temp, "Glass Center", (glass_center[0] + 10, glass_center[1]),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+        # UI text
         cv2.putText(temp, "Press Q to save and quit", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 255, 120), 2)
         if status_text:
@@ -229,7 +279,7 @@ def main():
 
     cv2.destroyAllWindows()
 
-    # save back to JSON (ROI + ROI-relative center + angle)
+    # save back to JSON (ROI + ROI-relative center + angle + glass contour + relative offset)
     if roi_start and roi_end and center_abs is not None:
         x0, y0 = roi_start
         x1, y1 = roi_end
@@ -247,6 +297,14 @@ def main():
         cfg.setdefault("tolerance_px", {"x": 10, "y": 10, "angle": 5})
         # optional scale: cfg.setdefault("px_to_mm", {"uniform": 0.10})
 
+        # NEW: save glass contour + relative offset (absolute coords in JSON)
+        if glass_contour is not None and len(glass_contour) > 0 and glass_center is not None:
+            cfg["glass_contour"] = glass_contour.tolist()
+            cfg["glass_center"] = [int(glass_center[0]), int(glass_center[1])]
+            base_to_glass_offset = [int(center_abs[0] - glass_center[0]),
+                                    int(center_abs[1] - glass_center[1])]
+            cfg["base_to_glass_offset"] = base_to_glass_offset
+
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w") as f:
             json.dump(cfg, f, indent=4)
@@ -255,6 +313,9 @@ def main():
         print(f"   roi={cfg['roi']}")
         print(f"   expected_center (ROI-relative)={cfg['expected_center']}")
         print(f"   expected_angle={cfg['expected_angle']}°")
+        if "glass_center" in cfg:
+            print(f"   glass_center={cfg['glass_center']}")
+            print(f"   base_to_glass_offset={cfg['base_to_glass_offset']}")
         print(f"   status={status_text}")
     else:
         print("⚠️ Incomplete calibration. Nothing saved.")
