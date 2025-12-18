@@ -1,324 +1,375 @@
-# roi_calibration.py
 import cv2
 import json
 import os
 import numpy as np
-import detector  # uses detect_baseplate and detect_glass_contour from your updated detector.py
+import detector
 
-# ------------------------------------------------------------
-# CONFIG
-# ------------------------------------------------------------
-CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"  # change if needed
+CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"
 
-# Detection knobs (aligned with original calibrator + detector.py)
-SHRINK_BORDER_PX = 10
-PADDING_PX = 30
-BORDER_MARGIN = 12
-CANNY_LOW = 50
-CANNY_HIGH = 120
-AREA_MIN_FRAC = 0.02
-AREA_MAX_FRAC = 0.60
-ASPECT_MIN   = 0.5
-ASPECT_MAX   = 2.2
-SOLIDITY_MIN = 0.7
-EXTENT_MIN   = 0.25
-CONTRAST_MIN = 12.0
+FOOTER_COLOR = (245, 245, 245)
+FOOTER_SHADOW = (30, 30, 30)
+STATUS_COLOR = (50, 50, 255)
 
-# ------------------------------------------------------------
-# Mouse + UI globals
-# ------------------------------------------------------------
-roi_start = None
-roi_end = None
-drawing = False
-roi_done = False
-
-center_abs = None        # baseplate center in absolute image coords
-chosen_cnt = None        # baseplate contour (absolute coords)
-chosen_angle = 0.0
-status_text = ""
-
-# Cached glass info for visualization
-glass_contour = None     # absolute coords
-glass_center = None      # absolute coords (bbox center)
+ZOOM_MIN = 1.0
+ZOOM_MAX = 8.0
+ZOOM_STEP = 1.25
+PAN_STEP_FRAC = 0.12
 
 
-def draw_roi(event, x, y, flags, param):
-    """Standard rectangle drawing for ROI selection."""
-    global roi_start, roi_end, drawing, roi_done
-    if event == cv2.EVENT_LBUTTONDOWN and not roi_done:
-        roi_start = (x, y)
-        roi_end = (x, y)
-        drawing = True
-    elif event == cv2.EVENT_MOUSEMOVE and drawing:
-        roi_end = (x, y)
-    elif event == cv2.EVENT_LBUTTONUP and drawing:
-        roi_end = (x, y)
-        drawing = False
-        roi_done = True
+def _load_cfg(path):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {}
 
 
-# ------------------------------------------------------------
-# Original calibrator helpers (kept intact)
-# ------------------------------------------------------------
-def _contrast_score(gray, cnt):
-    mask = np.zeros(gray.shape[:2], np.uint8)
-    cv2.drawContours(mask, [cnt], -1, 255, thickness=-1)
-    inside_mean = cv2.mean(gray, mask=mask)[0]
-    ring = cv2.dilate(mask, np.ones((7, 7), np.uint8), iterations=1)
-    ring = cv2.subtract(ring, mask)
-    if cv2.countNonZero(ring) == 0:
-        return -1e9
-    ring_mean = cv2.mean(gray, mask=ring)[0]
-    return inside_mean - ring_mean  # metal brighter than backprint
+def _save_cfg(path, cfg):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=4)
+    print("✅ Saved to", path)
 
 
-def _filter_and_score_contours(gray, W, H, contours):
-    roi_area = float(W * H)
-    keep = []
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-        # reject border-huggers
-        if x <= BORDER_MARGIN or y <= BORDER_MARGIN or \
-           x + w >= W - BORDER_MARGIN or y + h >= H - BORDER_MARGIN:
-            continue
 
-        area = cv2.contourArea(cnt)
-        if area < AREA_MIN_FRAC * roi_area or area > AREA_MAX_FRAC * roi_area:
-            continue
+def _roi_from_points(p0, p1):
+    x0, y0 = p0
+    x1, y1 = p1
+    x = int(min(x0, x1))
+    y = int(min(y0, y1))
+    w = int(abs(x1 - x0))
+    h = int(abs(y1 - y0))
+    return [x, y, max(1, w), max(1, h)]
 
-        aspect = (w / float(h)) if h else 0.0
-        if not (ASPECT_MIN <= aspect <= ASPECT_MAX):
-            continue
 
-        hull = cv2.convexHull(cnt)
-        hull_area = cv2.contourArea(hull) or 1.0
-        solidity = area / hull_area
-        if solidity < SOLIDITY_MIN:
-            continue
+def _get_view_rect(img_shape, zoom, center_xy):
+    H, W = img_shape[:2]
+    zoom = float(_clamp(zoom, ZOOM_MIN, ZOOM_MAX))
 
-        extent = area / float(max(1, w * h))
-        if extent < EXTENT_MIN:
-            continue
+    view_w = int(round(W / zoom))
+    view_h = int(round(H / zoom))
+    view_w = max(80, min(W, view_w))
+    view_h = max(80, min(H, view_h))
 
-        contr = _contrast_score(gray, cnt)
-        if contr < CONTRAST_MIN:
-            continue
+    cx, cy = center_xy
+    cx = float(_clamp(cx, 0, W - 1))
+    cy = float(_clamp(cy, 0, H - 1))
 
-        perim = cv2.arcLength(cnt, True)
-        keep.append({"cnt": cnt, "area": area, "perim": perim, "contrast": contr})
+    x0 = int(round(cx - view_w / 2))
+    y0 = int(round(cy - view_h / 2))
+    x0 = _clamp(x0, 0, W - view_w)
+    y0 = _clamp(y0, 0, H - view_h)
 
-    if not keep:
+    return int(x0), int(y0), int(view_w), int(view_h)
+
+
+def _disp_to_img(pt_xy, view_rect, disp_size):
+    vx, vy, vw, vh = view_rect
+    disp_w, disp_h = disp_size
+    x, y = float(pt_xy[0]), float(pt_xy[1])
+    ix = vx + x * (float(vw) / disp_w)
+    iy = vy + y * (float(vh) / disp_h)
+    return (float(ix), float(iy))
+
+
+def _line_endpoints_in_image(line, W, H):
+    vx, vy, x0, y0 = map(float, line)
+    pts = []
+
+    def add_if_in(xx, yy):
+        if 0 <= xx <= W - 1 and 0 <= yy <= H - 1:
+            pts.append((int(round(xx)), int(round(yy))))
+
+    if abs(vx) > 1e-9:
+        t = (0 - x0) / vx
+        add_if_in(x0 + vx * t, y0 + vy * t)
+        t = ((W - 1) - x0) / vx
+        add_if_in(x0 + vx * t, y0 + vy * t)
+
+    if abs(vy) > 1e-9:
+        t = (0 - y0) / vy
+        add_if_in(x0 + vx * t, y0 + vy * t)
+        t = ((H - 1) - y0) / vy
+        add_if_in(x0 + vx * t, y0 + vy * t)
+
+    if len(pts) < 2:
         return None
 
-    keep.sort(key=lambda s: (s["contrast"], s["perim"], s["area"]), reverse=True)
-    return keep[0]["cnt"]
+    best = (pts[0], pts[1])
+    best_d = -1
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            dx = pts[i][0] - pts[j][0]
+            dy = pts[i][1] - pts[j][1]
+            d = dx * dx + dy * dy
+            if d > best_d:
+                best_d = d
+                best = (pts[i], pts[j])
+    return best
 
 
-def _detect_in_roi(image, roi):
-    """
-    image: full image (BGR)
-    roi: [x, y, w, h]
-    returns: (center_abs_xy, angle_deg, contour_abs, ok:bool)
-    """
-    x, y, w, h = roi
-    crop = image[y:y+h, x:x+w]
-    if crop.size == 0:
-        return None, None, None, False
+def _draw_overlay(img_full, state):
+    vis = img_full.copy()
+    H, W = vis.shape[:2]
 
-    H0, W0 = crop.shape[:2]
-    sx = min(SHRINK_BORDER_PX, max(0, W0 // 10))
-    sy = min(SHRINK_BORDER_PX, max(0, H0 // 10))
-    x_in, y_in = sx, sy
-    w_in, h_in = max(1, W0 - 2 * sx), max(1, H0 - 2 * sy)
-    inner = crop[y_in:y_in+h_in, x_in:x_in+w_in]
+    # ROI (yellow)
+    roi = state.get("roi")
+    if roi is not None:
+        x, y, w, h = roi
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
 
-    gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, d=5, sigmaColor=40, sigmaSpace=40)
-    gray = cv2.equalizeHist(gray)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blurred, CANNY_LOW, CANNY_HIGH)
-    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+    # inner border debug
+    res = state.get("inner_res")
+    if res and res.get("ok"):
+        hull = res.get("hull_abs")
+        if hull is not None:
+            cv2.drawContours(vis, [hull], -1, (0, 255, 0), 2)
 
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, None, None, False
+        pts_abs = res.get("points_used_abs", {})
+        for k in ["left", "right", "bottom"]:
+            arr = pts_abs.get(k)
+            if arr is None:
+                continue
+            step = max(1, len(arr) // 350)
+            for px, py in arr[::step]:
+                cv2.circle(vis, (int(px), int(py)), 1, (0, 255, 0), -1)
 
-    best = _filter_and_score_contours(gray, w_in, h_in, contours)
-    if best is None:
-        return None, None, None, False
+        lines = res.get("lines", {})
+        colors = {"left": (255, 0, 0), "right": (255, 0, 0), "bottom": (255, 255, 0)}
+        for k in ["left", "right", "bottom"]:
+            if k not in lines:
+                continue
+            seg = _line_endpoints_in_image(lines[k], W, H)
+            if seg:
+                cv2.line(vis, seg[0], seg[1], colors[k], 2)
 
-    rect = cv2.minAreaRect(best)
-    (cx, cy), _, angle = rect
+    # baseplate center (red dot)
+    if state.get("bp_center_abs") is not None:
+        cx, cy = state["bp_center_abs"]
+        cv2.circle(vis, (int(cx), int(cy)), 7, (0, 0, 255), -1)
 
-    cx_abs = int(x + x_in + cx)
-    cy_abs = int(y + y_in + cy)
-    best_off = best + np.array([[x + x_in, y + y_in]])
-
-    return (cx_abs, cy_abs), float(round(angle, 2)), best_off, True
-
-
-# ------------------------------------------------------------
-# Glass detection (cached once for the golden sample)
-# ------------------------------------------------------------
-def _detect_glass_once(img):
-    """Detect and cache the glass contour and center for the golden sample."""
-    global glass_contour, glass_center
-    # Call detector's glass detection with only supported args
-    glass_contour = detector.detect_glass_contour(
-        img,
-        canny_low=CANNY_LOW,
-        canny_high=CANNY_HIGH,
-        border_margin=None  # full-glass often touches edges
-    )
-    if glass_contour is not None and len(glass_contour) > 0:
-        gx, gy, gw, gh = cv2.boundingRect(glass_contour)
-        glass_center = (gx + gw // 2, gy + gh // 2)
-    else:
-        glass_center = None
+    return vis
 
 
 def main():
-    global center_abs, chosen_cnt, chosen_angle, status_text, roi_start, roi_end, roi_done
-
-    # load config & image
-    if not os.path.exists(CONFIG_PATH):
-        print("❌ Config not found:", CONFIG_PATH)
+    cfg = _load_cfg(CONFIG_PATH)
+    golden_path = cfg.get("golden_image_path")
+    if not golden_path:
+        print("❌ Config missing 'golden_image_path'")
         return
-    with open(CONFIG_PATH, "r") as f:
-        cfg = json.load(f)
 
-    img_path = cfg.get("golden_image_path")
-    if not img_path:
-        print("❌ 'golden_image_path' missing in config.")
-        return
-    img = cv2.imread(img_path)
+    img = cv2.imread(golden_path)
     if img is None:
-        print("❌ Image not found. Check path:", img_path)
+        print("❌ Failed to load:", golden_path)
         return
 
-    # Detect full-glass once for visualization and saving
-    _detect_glass_once(img)
+    H, W = img.shape[:2]
+    disp_w = min(1600, W)
+    disp_h = int(round(disp_w * (H / float(W))))
+    disp_size = (disp_w, disp_h)
 
-    clone = img.copy()
-    cv2.namedWindow("Calibrator")
-    cv2.setMouseCallback("Calibrator", draw_roi)
+    state = {
+        "drawing": False,
+        "roi_start": None,
+        "roi_end": None,
+        "roi_done": False,
+
+        "roi": cfg.get("baseplate_roi") or cfg.get("registration_roi") or cfg.get("roi") or None,
+        "inner_res": None,
+
+        "click_mode": False,
+        "bp_center_abs": None,
+        "bp_auto": False,
+
+        "zoom": 1.0,
+        "view_center": (W / 2.0, H / 2.0),
+
+        "status": "Draw ROI around notch/baseplate. R=recompute. C=click baseplate center.",
+    }
+
+    def recompute_all():
+        if state["roi"] is None:
+            state["inner_res"] = None
+            state["bp_center_abs"] = None
+            state["bp_auto"] = False
+            state["status"] = "❌ No ROI. Draw ROI first."
+            return
+
+        # 1) inner border
+        res = detector.detect_inner_border_lines_edges_local(
+            img,
+            state["roi"],
+            canny_low=60,
+            canny_high=140,
+            min_points=40,
+            band_side_frac=0.22,
+            band_bottom_frac=0.25,
+            sample_stride=1,
+        )
+        state["inner_res"] = res
+
+        if not res.get("ok"):
+            state["bp_center_abs"] = None
+            state["bp_auto"] = False
+            state["status"] = f"❌ inner border failed: {res.get('reason')} counts={res.get('counts')}"
+            return
+
+        c = res.get("counts", {})
+        msg = f"✅ inner border OK. points L={c.get('left')} R={c.get('right')} B={c.get('bottom')}"
+
+        # 2) baseplate auto attempt (CLOSE-UP ROI)
+        bp = detector.detect_baseplate_in_roi(img, state["roi"])
+        if bp is not None:
+            state["bp_center_abs"] = bp
+            state["bp_auto"] = True
+            msg += " | ✅ baseplate auto"
+        else:
+            state["bp_center_abs"] = None
+            state["bp_auto"] = False
+            msg += " | ❌ baseplate not found (press C to click)"
+
+        msg += " | Enter=save"
+        state["status"] = msg
+
+    if state["roi"] is not None:
+        recompute_all()
+
+    win = "calibrate"
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+
+    def on_mouse(event, x, y, flags, param):
+        view_rect = _get_view_rect(img.shape, state["zoom"], state["view_center"])
+        ix, iy = _disp_to_img((x, y), view_rect, disp_size)
+
+        # Manual click baseplate center
+        if state["click_mode"] and event == cv2.EVENT_LBUTTONDOWN:
+            state["bp_center_abs"] = (float(ix), float(iy))
+            state["bp_auto"] = False
+            state["click_mode"] = False
+            state["status"] = "✅ baseplate center set (manual click). Enter=save"
+            return
+
+        # Draw ROI
+        if event == cv2.EVENT_LBUTTONDOWN:
+            state["roi_start"] = (float(ix), float(iy))
+            state["roi_end"] = (float(ix), float(iy))
+            state["drawing"] = True
+            state["roi_done"] = False
+        elif event == cv2.EVENT_MOUSEMOVE and state["drawing"]:
+            state["roi_end"] = (float(ix), float(iy))
+        elif event == cv2.EVENT_LBUTTONUP:
+            state["roi_end"] = (float(ix), float(iy))
+            state["drawing"] = False
+            state["roi_done"] = True
+
+    cv2.setMouseCallback(win, on_mouse)
 
     while True:
-        temp = clone.copy()
+        if state["drawing"] and state["roi_start"] and state["roi_end"]:
+            state["roi"] = _roi_from_points(
+                (int(state["roi_start"][0]), int(state["roi_start"][1])),
+                (int(state["roi_end"][0]), int(state["roi_end"][1])),
+            )
 
-        # Live ROI rectangle while dragging
-        if roi_start and roi_end:
-            cv2.rectangle(temp, roi_start, roi_end, (0, 255, 0), 2)
+        if state["roi_done"]:
+            state["roi_done"] = False
+            state["bp_center_abs"] = None
+            state["bp_auto"] = False
+            recompute_all()
 
-        # When ROI is finalized, detect baseplate inside it (single pass)
-        if roi_done and center_abs is None:
-            x0, y0 = roi_start
-            x1, y1 = roi_end
-            roi_x = min(x0, x1)
-            roi_y = min(y0, y1)
-            roi_w = abs(x1 - x0)
-            roi_h = abs(y1 - y0)
-            roi_box = [roi_x, roi_y, roi_w, roi_h]
+        overlay = _draw_overlay(img, state)
 
-            # Use original calibrator detection path to maintain behavior
-            c_abs, ang, cnt_abs, ok = _detect_in_roi(img, roi_box)
-            if ok:
-                status_text = "Main ROI used"
-                center_abs, chosen_angle, chosen_cnt = c_abs, ang, cnt_abs
-            else:
-                # padded pass (original behavior)
-                H, W = img.shape[:2]
-                x_pad = max(0, roi_x - PADDING_PX)
-                y_pad = max(0, roi_y - PADDING_PX)
-                w_pad = min(roi_w + 2 * PADDING_PX, W - x_pad)
-                h_pad = min(roi_h + 2 * PADDING_PX, H - y_pad)
-                padded_box = [x_pad, y_pad, w_pad, h_pad]
+        view_rect = _get_view_rect(img.shape, state["zoom"], state["view_center"])
+        vx, vy, vw, vh = view_rect
+        view = overlay[vy:vy + vh, vx:vx + vw]
+        view_disp = cv2.resize(view, disp_size, interpolation=cv2.INTER_LINEAR)
 
-                c_abs, ang, cnt_abs, ok2 = _detect_in_roi(img, padded_box)
-                if ok2:
-                    status_text = f"Padded ROI used (+{PADDING_PX}px)"
-                    center_abs, chosen_angle, chosen_cnt = c_abs, ang, cnt_abs
-                else:
-                    status_text = "Fallback using ROI center"
-                    center_abs = (roi_x + roi_w // 2, roi_y + roi_h // 2)
-                    chosen_angle = 0.0
-                    chosen_cnt = None
+        cv2.putText(view_disp, state["status"], (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.95, STATUS_COLOR, 2)
 
-        # Draw baseplate center + crosshairs
-        if center_abs is not None:
-            cv2.circle(temp, center_abs, 5, (0, 0, 255), -1)
-            cv2.line(temp, (center_abs[0], 0), (center_abs[0], temp.shape[0]), (0, 255, 255), 1)
-            cv2.line(temp, (0, center_abs[1]), (temp.shape[1], center_abs[1]), (0, 255, 255), 1)
+        footer = "Draw ROI | R=recompute | C=click center | Enter=save | +/- zoom | WASD pan | 0 reset | Q/Esc quit"
+        cv2.putText(view_disp, footer, (20, view_disp.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.70, FOOTER_SHADOW, 3)
+        cv2.putText(view_disp, footer, (20, view_disp.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.70, FOOTER_COLOR, 2)
 
-        # Draw detected baseplate contour
-        if chosen_cnt is not None and len(chosen_cnt) > 0:
-            cv2.drawContours(temp, [chosen_cnt], -1, (0, 255, 0), 2)
+        cv2.imshow(win, view_disp)
+        key = cv2.waitKey(20) & 0xFF
 
-        # Draw glass contour + center (for confirmation)
-        if glass_contour is not None and len(glass_contour) > 0:
-            cv2.drawContours(temp, [glass_contour], -1, (255, 0, 0), 2)  # blue
-            if glass_center is not None:
-                cv2.circle(temp, glass_center, 5, (0, 255, 0), -1)       # green
-                cv2.putText(temp, "Glass Center", (glass_center[0] + 10, glass_center[1]),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # zoom
+        if key in (ord('+'), ord('=')):
+            state["zoom"] = float(_clamp(state["zoom"] * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX))
+        if key in (ord('-'), ord('_')):
+            state["zoom"] = float(_clamp(state["zoom"] / ZOOM_STEP, ZOOM_MIN, ZOOM_MAX))
+        if key == ord('0'):
+            state["zoom"] = 1.0
+            state["view_center"] = (W / 2.0, H / 2.0)
 
-        # UI text
-        cv2.putText(temp, "Press Q to save and quit", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (120, 255, 120), 2)
-        if status_text:
-            cv2.putText(temp, status_text, (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (0, 0, 255) if "Fallback" in status_text else (0, 255, 0), 2)
+        # pan
+        if key in (ord('w'), ord('a'), ord('s'), ord('d')):
+            vx, vy, vw, vh = _get_view_rect(img.shape, state["zoom"], state["view_center"])
+            cx, cy = state["view_center"]
+            if key == ord('w'):
+                cy -= PAN_STEP_FRAC * vh
+            elif key == ord('s'):
+                cy += PAN_STEP_FRAC * vh
+            elif key == ord('a'):
+                cx -= PAN_STEP_FRAC * vw
+            elif key == ord('d'):
+                cx += PAN_STEP_FRAC * vw
+            state["view_center"] = (_clamp(cx, 0, W - 1), _clamp(cy, 0, H - 1))
 
-        cv2.imshow("Calibrator", temp)
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if key == ord('r'):
+            recompute_all()
+
+        if key == ord('c'):
+            state["click_mode"] = True
+            state["status"] = "🖱️ Click mode: click baseplate center (overrides auto)"
+
+        # save (Enter)
+        if key == 13:
+            if state["roi"] is None:
+                print("❌ No ROI.")
+                continue
+
+            res = state["inner_res"]
+            if not res or not res.get("ok"):
+                print("❌ Inner border not valid.")
+                continue
+
+            if state["bp_center_abs"] is None:
+                print("❌ No baseplate center. Use C to click, or adjust ROI and press R.")
+                state["status"] = "❌ No baseplate center. Press C to click it."
+                continue
+
+            rx, ry, _, _ = state["roi"]
+
+            # Store ROI
+            cfg["baseplate_roi"] = [int(v) for v in state["roi"]]
+            cfg["roi"] = cfg["baseplate_roi"]  # compat
+
+            # Store lines
+            cfg["inner_border_lines_used"] = ["left", "right", "bottom"]
+            cfg["inner_border_lines"] = {k: [float(v) for v in res["lines"][k]] for k in ["left", "right", "bottom"]}
+
+            # Store baseplate center relative to ROI
+            cfg["expected_center_in_baseplate_roi"] = [
+                float(state["bp_center_abs"][0] - rx),
+                float(state["bp_center_abs"][1] - ry),
+            ]
+            cfg["expected_center"] = cfg["expected_center_in_baseplate_roi"]  # compat
+
+            cfg["baseplate_center_source"] = "auto" if state["bp_auto"] else "manual"
+
+            _save_cfg(CONFIG_PATH, cfg)
+            state["status"] = f"✅ Saved calibration. baseplate={cfg['baseplate_center_source']}"
+
+        if key == 27 or key == ord('q'):
             break
 
     cv2.destroyAllWindows()
-
-    # save back to JSON (ROI + ROI-relative center + angle + glass contour + relative offset)
-    if roi_start and roi_end and center_abs is not None:
-        x0, y0 = roi_start
-        x1, y1 = roi_end
-        roi_x = min(x0, x1)
-        roi_y = min(y0, y1)
-        roi_w = abs(x1 - x0)
-        roi_h = abs(y1 - y0)
-
-        cx_rel = int(center_abs[0] - roi_x)
-        cy_rel = int(center_abs[1] - roi_y)
-
-        cfg["roi"] = [roi_x, roi_y, roi_w, roi_h]
-        cfg["expected_center"] = [cx_rel, cy_rel]
-        cfg["expected_angle"] = float(chosen_angle)
-        cfg.setdefault("tolerance_px", {"x": 10, "y": 10, "angle": 5})
-        # optional scale: cfg.setdefault("px_to_mm", {"uniform": 0.10})
-
-        # NEW: save glass contour + relative offset (absolute coords in JSON)
-        if glass_contour is not None and len(glass_contour) > 0 and glass_center is not None:
-            cfg["glass_contour"] = glass_contour.tolist()
-            cfg["glass_center"] = [int(glass_center[0]), int(glass_center[1])]
-            base_to_glass_offset = [int(center_abs[0] - glass_center[0]),
-                                    int(center_abs[1] - glass_center[1])]
-            cfg["base_to_glass_offset"] = base_to_glass_offset
-
-        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-        with open(CONFIG_PATH, "w") as f:
-            json.dump(cfg, f, indent=4)
-
-        print("✅ Saved to", CONFIG_PATH)
-        print(f"   roi={cfg['roi']}")
-        print(f"   expected_center (ROI-relative)={cfg['expected_center']}")
-        print(f"   expected_angle={cfg['expected_angle']}°")
-        if "glass_center" in cfg:
-            print(f"   glass_center={cfg['glass_center']}")
-            print(f"   base_to_glass_offset={cfg['base_to_glass_offset']}")
-        print(f"   status={status_text}")
-    else:
-        print("⚠️ Incomplete calibration. Nothing saved.")
 
 
 if __name__ == "__main__":
