@@ -1,6 +1,21 @@
 import cv2
 import numpy as np
 
+def load_and_crop(image_path, roi):
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"❌ Failed to load image: {image_path}")
+
+    x, y, w, h = roi
+    H, W = image.shape[:2]
+    x = max(0, min(int(x), W - 1))
+    y = max(0, min(int(y), H - 1))
+    w = max(1, min(int(w), W - x))
+    h = max(1, min(int(h), H - y))
+
+    return image[y:y+h, x:x+w], image
+
+
 # ------------------------------------------------------------
 # Baseplate detection (contour-based, ROI-constrained)
 # ------------------------------------------------------------
@@ -298,3 +313,84 @@ def detect_inner_border_lines_edges_local(
         "points_used_abs": {"left": pts_left_abs, "right": pts_right_abs, "bottom": pts_bottom_abs},
         "hull_abs": hull_abs,
     }
+
+def detect_baseplate_in_roi(
+    full_img,
+    roi,
+    *,
+    return_debug: bool = False,
+    # v0-ish defaults (good for close-up notch/baseplate ROI)
+    padding: int = 30,
+    shrink_border_px: int = 10,
+    canny_low: int = 50,
+    canny_high: int = 120,
+    area_min_frac: float = 0.02,
+    area_max_frac: float = 0.60,
+    aspect_min: float = 0.5,
+    aspect_max: float = 2.2,
+    solidity_min: float = 0.7,
+    extent_min: float = 0.25,
+    border_margin: int = 12,
+    contrast_min: float = 12.0,
+):
+    """
+    Backwards compatible wrapper.
+
+    - return_debug=False  -> returns center_abs (x,y) or None
+    - return_debug=True   -> returns dict:
+        {"ok":bool, "center_abs":(x,y) or None, "angle":float or None, "contour_abs":ndarray or None}
+    """
+    if full_img is None or roi is None:
+        out = None
+        if return_debug:
+            return {"ok": False, "center_abs": None, "angle": None, "contour_abs": None, "reason": "no_image_or_roi"}
+        return out
+
+    x, y, w, h = map(int, roi)
+    H, W = full_img.shape[:2]
+    x = max(0, min(x, W - 1))
+    y = max(0, min(y, H - 1))
+    w = max(1, min(w, W - x))
+    h = max(1, min(h, H - y))
+
+    crop = full_img[y:y+h, x:x+w]
+
+    center_rel, ang, cnt_rel = detect_baseplate(
+        crop,
+        full_image=full_img,
+        roi=[x, y, w, h],
+        padding=padding,
+        shrink_border_px=shrink_border_px,
+        canny_low=canny_low,
+        canny_high=canny_high,
+        area_min_frac=area_min_frac,
+        area_max_frac=area_max_frac,
+        aspect_min=aspect_min,
+        aspect_max=aspect_max,
+        solidity_min=solidity_min,
+        extent_min=extent_min,
+        border_margin=border_margin,
+        contrast_min=contrast_min,
+    )
+
+    if center_rel is None:
+        if return_debug:
+            return {"ok": False, "center_abs": None, "angle": None, "contour_abs": None, "reason": "not_found"}
+        return None
+
+    cx_abs = float(x + center_rel[0])
+    cy_abs = float(y + center_rel[1])
+
+    contour_abs = None
+    if cnt_rel is not None:
+        contour_abs = cnt_rel + np.array([[x, y]], dtype=np.int32)
+
+    if return_debug:
+        return {
+            "ok": True,
+            "center_abs": (cx_abs, cy_abs),
+            "angle": float(ang) if ang is not None else None,
+            "contour_abs": contour_abs,
+        }
+
+    return (cx_abs, cy_abs)
