@@ -6,14 +6,56 @@ import detector
 
 CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"
 
-FOOTER_COLOR = (245, 245, 245)
+FOOTER_COLOR  = (245, 245, 245)
 FOOTER_SHADOW = (30, 30, 30)
-STATUS_COLOR = (50, 50, 255)
+
+STATUS_COLOR  = (50, 50, 255)
+STATUS_SCALE  = 0.72
+STATUS_THICK  = 2
 
 ZOOM_MIN = 1.0
 ZOOM_MAX = 8.0
 ZOOM_STEP = 1.25
 PAN_STEP_FRAC = 0.12
+
+# baseplate detector defaults (v0-ish)
+BP_KW = dict(
+    padding=30,
+    shrink_border_px=10,
+    canny_low=50,
+    canny_high=120,
+    area_min_frac=0.02,
+    area_max_frac=0.60,
+    aspect_min=0.5,
+    aspect_max=2.2,
+    solidity_min=0.7,
+    extent_min=0.25,
+    border_margin=12,
+    contrast_min=12.0,
+)
+
+def _normalize_contour_abs(cnt, roi):
+    """
+    Some detector paths return contour points ROI-relative (0..w,0..h).
+    Some return absolute.
+    This converts to absolute safely.
+    """
+    if cnt is None or len(cnt) < 3 or roi is None:
+        return cnt
+
+    rx, ry, rw, rh = roi
+    pts = cnt.reshape(-1, 2).astype(np.float32)
+
+    # Heuristic: if most points lie inside ROI extents, treat as ROI-relative
+    in_rel = np.mean((pts[:, 0] >= -5) & (pts[:, 0] <= rw + 5) &
+                     (pts[:, 1] >= -5) & (pts[:, 1] <= rh + 5))
+
+    if in_rel > 0.85:
+        pts[:, 0] += rx
+        pts[:, 1] += ry
+        return pts.reshape(cnt.shape).astype(cnt.dtype)
+
+    return cnt
 
 
 def _load_cfg(path):
@@ -22,17 +64,14 @@ def _load_cfg(path):
             return json.load(f)
     return {}
 
-
 def _save_cfg(path, cfg):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         json.dump(cfg, f, indent=4)
-    print("✅ Saved to", path)
-
+    print("OK! Saved to", path)
 
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
-
 
 def _roi_from_points(p0, p1):
     x0, y0 = p0
@@ -42,7 +81,6 @@ def _roi_from_points(p0, p1):
     w = int(abs(x1 - x0))
     h = int(abs(y1 - y0))
     return [x, y, max(1, w), max(1, h)]
-
 
 def _get_view_rect(img_shape, zoom, center_xy):
     H, W = img_shape[:2]
@@ -64,7 +102,6 @@ def _get_view_rect(img_shape, zoom, center_xy):
 
     return int(x0), int(y0), int(view_w), int(view_h)
 
-
 def _disp_to_img(pt_xy, view_rect, disp_size):
     vx, vy, vw, vh = view_rect
     disp_w, disp_h = disp_size
@@ -72,7 +109,6 @@ def _disp_to_img(pt_xy, view_rect, disp_size):
     ix = vx + x * (float(vw) / disp_w)
     iy = vy + y * (float(vh) / disp_h)
     return (float(ix), float(iy))
-
 
 def _line_endpoints_in_image(line, W, H):
     vx, vy, x0, y0 = map(float, line)
@@ -109,18 +145,23 @@ def _line_endpoints_in_image(line, W, H):
                 best = (pts[i], pts[j])
     return best
 
-
 def _draw_overlay(img_full, state):
     vis = img_full.copy()
     H, W = vis.shape[:2]
 
-    # ROI (yellow)
-    roi = state.get("roi")
-    if roi is not None:
-        x, y, w, h = roi
+    # registration ROI (magenta)
+    reg = state.get("registration_roi")
+    if reg is not None:
+        x, y, w, h = reg
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (255, 0, 255), 2)
+
+    # baseplate ROI (yellow)
+    bp_roi = state.get("baseplate_roi")
+    if bp_roi is not None:
+        x, y, w, h = bp_roi
         cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
 
-    # inner border debug
+    # inner border debug (from registration ROI)
     res = state.get("inner_res")
     if res and res.get("ok"):
         hull = res.get("hull_abs")
@@ -145,24 +186,29 @@ def _draw_overlay(img_full, state):
             if seg:
                 cv2.line(vis, seg[0], seg[1], colors[k], 2)
 
+    # baseplate chosen contour (cyan) — only if available
+    bp_cnt = state.get("bp_contour_abs")
+    if bp_cnt is not None and len(bp_cnt) >= 3:
+        cv2.drawContours(vis, [bp_cnt], -1, (255, 255, 0), 2)
+
     # baseplate center (red dot)
-    if state.get("bp_center_abs") is not None:
-        cx, cy = state["bp_center_abs"]
+    bp = state.get("bp_center_abs")
+    if bp is not None:
+        cx, cy = bp
         cv2.circle(vis, (int(cx), int(cy)), 7, (0, 0, 255), -1)
 
     return vis
-
 
 def main():
     cfg = _load_cfg(CONFIG_PATH)
     golden_path = cfg.get("golden_image_path")
     if not golden_path:
-        print("❌ Config missing 'golden_image_path'")
+        print("FAIL! Config missing 'golden_image_path'")
         return
 
     img = cv2.imread(golden_path)
     if img is None:
-        print("❌ Failed to load:", golden_path)
+        print("FAIL! Failed to load:", golden_path)
         return
 
     H, W = img.shape[:2]
@@ -171,36 +217,45 @@ def main():
     disp_size = (disp_w, disp_h)
 
     state = {
+        # drawing state
         "drawing": False,
         "roi_start": None,
         "roi_end": None,
         "roi_done": False,
 
-        "roi": cfg.get("baseplate_roi") or cfg.get("registration_roi") or cfg.get("roi") or None,
-        "inner_res": None,
+        # which ROI is being drawn right now
+        # "registration" or "baseplate"
+        "draw_mode": "registration",
 
-        "click_mode": False,
+        # stored ROIs
+        "registration_roi": cfg.get("registration_roi") or None,
+        "baseplate_roi": cfg.get("baseplate_roi") or cfg.get("roi") or None,
+
+        # detection results
+        "inner_res": None,
         "bp_center_abs": None,
+        "bp_contour_abs": None,
         "bp_auto": False,
 
+        # UI
+        "click_mode": False,
         "zoom": 1.0,
         "view_center": (W / 2.0, H / 2.0),
 
-        "status": "Draw ROI around notch/baseplate. R=recompute. C=click baseplate center.",
+        "status": "Press 1: draw REG ROI (notch) | Press 2: draw BP ROI | R=recompute | C=click BP center | Enter=save",
     }
 
     def recompute_all():
-        if state["roi"] is None:
+        # Need registration ROI to compute notch lines
+        if state["registration_roi"] is None:
             state["inner_res"] = None
-            state["bp_center_abs"] = None
-            state["bp_auto"] = False
-            state["status"] = "❌ No ROI. Draw ROI first."
+            state["status"] = "FAIL! No registration ROI. Press 1 and draw ROI around notch/inner contour."
             return
 
-        # 1) inner border
+        # 1) inner border lines from registration ROI
         res = detector.detect_inner_border_lines_edges_local(
             img,
-            state["roi"],
+            state["registration_roi"],
             canny_low=60,
             canny_high=140,
             min_points=40,
@@ -211,29 +266,38 @@ def main():
         state["inner_res"] = res
 
         if not res.get("ok"):
-            state["bp_center_abs"] = None
-            state["bp_auto"] = False
-            state["status"] = f"❌ inner border failed: {res.get('reason')} counts={res.get('counts')}"
+            state["status"] = f"FAIL! Inner border FAILED: {res.get('reason')} counts={res.get('counts')}"
             return
 
         c = res.get("counts", {})
-        msg = f"✅ inner border OK. points L={c.get('left')} R={c.get('right')} B={c.get('bottom')}"
+        msg = f"OK! Notch lines OK. L={c.get('left')} R={c.get('right')} B={c.get('bottom')}"
 
-        # 2) baseplate auto attempt (CLOSE-UP ROI)
-        bp = detector.detect_baseplate_in_roi(img, state["roi"])
-        if bp is not None:
-            state["bp_center_abs"] = bp
+        # 2) baseplate auto (needs baseplate ROI)
+        if state["baseplate_roi"] is None:
+            state["bp_center_abs"] = None
+            state["bp_contour_abs"] = None
+            state["bp_auto"] = False
+            state["status"] = msg + " | WARNING! No BP ROI (press 2 to draw)"
+            return
+
+        dbg = detector.detect_baseplate_in_roi(img, state["baseplate_roi"], return_debug=True, **BP_KW)
+
+        if dbg and dbg.get("ok") and dbg.get("center_abs") is not None:
+            state["bp_center_abs"] = dbg["center_abs"]
+            state["bp_contour_abs"] = dbg.get("contour_abs")
             state["bp_auto"] = True
-            msg += " | ✅ baseplate auto"
+            msg += " | OK! Baseplate: AUTO"
         else:
             state["bp_center_abs"] = None
+            state["bp_contour_abs"] = None
             state["bp_auto"] = False
-            msg += " | ❌ baseplate not found (press C to click)"
+            msg += " | FAIL! Baseplate: NOT FOUND (press C to click)"
 
         msg += " | Enter=save"
         state["status"] = msg
 
-    if state["roi"] is not None:
+    # initial recompute if we have enough data
+    if state["registration_roi"] is not None:
         recompute_all()
 
     win = "calibrate"
@@ -243,12 +307,13 @@ def main():
         view_rect = _get_view_rect(img.shape, state["zoom"], state["view_center"])
         ix, iy = _disp_to_img((x, y), view_rect, disp_size)
 
-        # Manual click baseplate center
+        # Manual click baseplate center (override)
         if state["click_mode"] and event == cv2.EVENT_LBUTTONDOWN:
             state["bp_center_abs"] = (float(ix), float(iy))
+            state["bp_contour_abs"] = None
             state["bp_auto"] = False
             state["click_mode"] = False
-            state["status"] = "✅ baseplate center set (manual click). Enter=save"
+            state["status"] = "OK! Baseplate center set (manual click). Enter=save"
             return
 
         # Draw ROI
@@ -267,15 +332,22 @@ def main():
     cv2.setMouseCallback(win, on_mouse)
 
     while True:
+        # update ROI while drawing
         if state["drawing"] and state["roi_start"] and state["roi_end"]:
-            state["roi"] = _roi_from_points(
+            roi_tmp = _roi_from_points(
                 (int(state["roi_start"][0]), int(state["roi_start"][1])),
                 (int(state["roi_end"][0]), int(state["roi_end"][1])),
             )
+            if state["draw_mode"] == "registration":
+                state["registration_roi"] = roi_tmp
+            else:
+                state["baseplate_roi"] = roi_tmp
 
         if state["roi_done"]:
             state["roi_done"] = False
+            # clear derived results that depend on ROIs
             state["bp_center_abs"] = None
+            state["bp_contour_abs"] = None
             state["bp_auto"] = False
             recompute_all()
 
@@ -286,17 +358,26 @@ def main():
         view = overlay[vy:vy + vh, vx:vx + vw]
         view_disp = cv2.resize(view, disp_size, interpolation=cv2.INTER_LINEAR)
 
-        cv2.putText(view_disp, state["status"], (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.95, STATUS_COLOR, 2)
+        # status + footer
+        cv2.putText(view_disp, state["status"], (18, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, STATUS_SCALE, STATUS_COLOR, STATUS_THICK)
 
-        footer = "Draw ROI | R=recompute | C=click center | Enter=save | +/- zoom | WASD pan | 0 reset | Q/Esc quit"
-        cv2.putText(view_disp, footer, (20, view_disp.shape[0] - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.70, FOOTER_SHADOW, 3)
-        cv2.putText(view_disp, footer, (20, view_disp.shape[0] - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.70, FOOTER_COLOR, 2)
+        footer = "1=REG ROI | 2=BP ROI | R=recompute | C=click BP center | Enter=save | +/- zoom | WASD pan | 0 reset | Q/Esc quit"
+        cv2.putText(view_disp, footer, (18, view_disp.shape[0] - 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, FOOTER_SHADOW, 3)
+        cv2.putText(view_disp, footer, (18, view_disp.shape[0] - 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, FOOTER_COLOR, 2)
 
         cv2.imshow(win, view_disp)
         key = cv2.waitKey(20) & 0xFF
+
+        # switch draw mode
+        if key == ord('1'):
+            state["draw_mode"] = "registration"
+            state["status"] = "🟪 Draw REG ROI around notch/inner contour area (blue lines)."
+        if key == ord('2'):
+            state["draw_mode"] = "baseplate"
+            state["status"] = "🟨 Draw BP ROI around baseplate (tight)."
 
         # zoom
         if key in (ord('+'), ord('=')):
@@ -326,51 +407,62 @@ def main():
 
         if key == ord('c'):
             state["click_mode"] = True
-            state["status"] = "🖱️ Click mode: click baseplate center (overrides auto)"
+            state["status"] = "🖱️ Click mode: click baseplate center (manual override)."
 
         # save (Enter)
         if key == 13:
-            if state["roi"] is None:
-                print("❌ No ROI.")
+            if state["registration_roi"] is None:
+                print("FAIL! No registration_roi (press 1 and draw).")
+                state["status"] = "FAIL! Need registration ROI (press 1)."
                 continue
 
             res = state["inner_res"]
             if not res or not res.get("ok"):
-                print("❌ Inner border not valid.")
+                print("FAIL! Notch lines invalid. Press R or redraw registration ROI.")
+                state["status"] = "FAIL! Notch lines invalid. Press R."
+                continue
+
+            if state["baseplate_roi"] is None:
+                print("FAIL! No baseplate_roi (press 2 and draw).")
+                state["status"] = "FAIL! Need baseplate ROI (press 2)."
                 continue
 
             if state["bp_center_abs"] is None:
-                print("❌ No baseplate center. Use C to click, or adjust ROI and press R.")
-                state["status"] = "❌ No baseplate center. Press C to click it."
+                print("FAIL! No baseplate center. Press C to click it or adjust BP ROI and press R.")
+                state["status"] = "FAIL! No baseplate center. Press C."
                 continue
 
-            rx, ry, _, _ = state["roi"]
+            brx, bry, _, _ = state["baseplate_roi"]
 
-            # Store ROI
-            cfg["baseplate_roi"] = [int(v) for v in state["roi"]]
-            cfg["roi"] = cfg["baseplate_roi"]  # compat
+            # Save ROIs
+            cfg["registration_roi"] = [int(v) for v in state["registration_roi"]]
+            cfg["baseplate_roi"] = [int(v) for v in state["baseplate_roi"]]
 
-            # Store lines
+            # keep compat (old code expects cfg["roi"] to be baseplate ROI)
+            cfg["roi"] = cfg["baseplate_roi"]
+
+            # Save notch geometry (THIS is the “blue line” reference frame)
             cfg["inner_border_lines_used"] = ["left", "right", "bottom"]
-            cfg["inner_border_lines"] = {k: [float(v) for v in res["lines"][k]] for k in ["left", "right", "bottom"]}
+            cfg["inner_border_lines"] = {
+                k: [float(v) for v in res["lines"][k]]
+                for k in ["left", "right", "bottom"]
+            }
 
-            # Store baseplate center relative to ROI
+            # Save expected baseplate center relative to baseplate ROI
             cfg["expected_center_in_baseplate_roi"] = [
-                float(state["bp_center_abs"][0] - rx),
-                float(state["bp_center_abs"][1] - ry),
+                float(state["bp_center_abs"][0] - brx),
+                float(state["bp_center_abs"][1] - bry),
             ]
             cfg["expected_center"] = cfg["expected_center_in_baseplate_roi"]  # compat
-
             cfg["baseplate_center_source"] = "auto" if state["bp_auto"] else "manual"
 
             _save_cfg(CONFIG_PATH, cfg)
-            state["status"] = f"✅ Saved calibration. baseplate={cfg['baseplate_center_source']}"
+            state["status"] = f"OK! Saved. notch lines + ROIs + baseplate center ({cfg['baseplate_center_source']})"
 
         if key == 27 or key == ord('q'):
             break
 
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
