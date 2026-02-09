@@ -4,7 +4,7 @@ import os
 import numpy as np
 import detector
 
-CONFIG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"
+CONFIG_PATH = r"C:\Users\m.afrazeh\PycharmProjects\VenusGlass-A-MBPAC\recipes\C270TEST_207\golden_config.json"
 
 FOOTER_COLOR  = (245, 245, 245)
 FOOTER_SHADOW = (30, 30, 30)
@@ -14,7 +14,7 @@ STATUS_SCALE  = 0.72
 STATUS_THICK  = 2
 
 ZOOM_MIN = 1.0
-ZOOM_MAX = 8.0
+ZOOM_MAX = 10.0
 ZOOM_STEP = 1.25
 PAN_STEP_FRAC = 0.12
 

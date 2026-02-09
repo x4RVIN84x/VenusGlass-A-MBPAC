@@ -1,0 +1,40 @@
+{
+  "image": "E:\\ARVIN\\A-MBPAC\\incoming\\WhatsApp Image 2025-12-18 at 10.57.44 AM (1).jpeg",
+  "detected": true,
+  "roi": [
+    224,
+    209,
+    570,
+    358
+  ],
+  "golden_center_roi": [
+    305.0,
+    186.5
+  ],
+  "test_center_roi": [
+    275.189208984375,
+    164.6351318359375
+  ],
+  "angles": {
+    "detected": 80.54,
+    "golden": 0.0,
+    "delta": 80.54000000000002
+  },
+  "deltas": {
+    "dx_px": 29.810791015625,
+    "dy_px": 21.8648681640625,
+    "dx_mm": 3.3200134173862024,
+    "dy_mm": 2.4350798218007634
+  },
+  "tolerances": {
+    "x": 10,
+    "y": 10,
+    "angle": 5
+  },
+  "overall": false,
+  "status": "FAIL",
+  "files": {
+    "raw": "E:\\ARVIN\\A-MBPAC\\output\\2026-02-01\\091151_WhatsApp Image 2025-12-18 at 10.57.44 AM (1)\\raw.jpg",
+    "overlay": "E:\\ARVIN\\A-MBPAC\\output\\2026-02-01\\091151_WhatsApp Image 2025-12-18 at 10.57.44 AM (1)\\overlay.jpg"
+  }
+}

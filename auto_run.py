@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 
 from detector import load_and_crop, detect_baseplate
-from compare_to_golden import compare_to_golden, overlay_reference_and_test
+from compare_to_golden import compare_to_golden
 
 
 def _load_cfg(config_path: str) -> dict:
@@ -44,8 +44,14 @@ def _list_images(folder: str):
 
 def _cv_overlay_image(
     full_img_bgr: np.ndarray,
-    roi, golden_center_roi, test_center_roi,
-    test_contour=None, golden_contour=None,
+    roi,
+    golden_center_roi,
+    test_center_roi,
+    golden_angle,
+    test_angle,
+    dtheta,
+    test_contour=None,
+    golden_contour=None,
     status="",
     px_to_mm=None,
 ):
@@ -86,8 +92,9 @@ def _cv_overlay_image(
 
     # Top-left metrics box
     lines = [
-        f"ΔX = {dx_abs:.1f} px" + (f" ({abs(dx_mm):.2f} mm)" if dx_mm is not None else ""),
-        f"ΔY = {dy_abs:.1f} px" + (f" ({abs(dy_mm):.2f} mm)" if dy_mm is not None else "")
+        f"dX = {dx_abs:.1f} px" + (f" ({abs(dx_mm):.2f} mm)" if dx_mm is not None else ""),
+        f"dY = {dy_abs:.1f} px" + (f" ({abs(dy_mm):.2f} mm)" if dy_mm is not None else ""),
+        f"dA = {abs(dtheta):.2f}Deg",
     ]
     tl = (x + 10, y + 25)
     for i, line in enumerate(lines):
@@ -197,9 +204,17 @@ def run_batch(
 
             # overlay for saving (OpenCV version for auto-close reliability)
             overlay_img = _cv_overlay_image(
-                full_test_img, roi, golden_center, test_center,
-                test_contour=test_contour, golden_contour=golden_contour,
-                status=status, px_to_mm=px_to_mm
+                full_test_img,
+                roi,
+                golden_center,
+                test_center,
+                golden_angle,
+                test_angle,
+                result["dtheta"],
+                test_contour=test_contour,
+                golden_contour=golden_contour,
+                status=status,
+                px_to_mm=px_to_mm,
             )
             overlay_out = os.path.join(run_dir, "overlay.jpg")
             cv2.imwrite(overlay_out, overlay_img)

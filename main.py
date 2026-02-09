@@ -16,11 +16,11 @@ AUTO_MODE = False
 SHOW_OVERLAY = True
 USE_ROI_STAB = True
 
-CFG_PATH = r"E:\ARVIN\A-MBPAC\reference_json\207_golden_configv2.json"
-INCOMING_DIR = r"E:\ARVIN\A-MBPAC\incoming"
+CFG_PATH = r"C:\Users\m.afrazeh\PycharmProjects\VenusGlass-A-MBPAC\recepies\C270TEST_207\golden_config.json"
+INCOMING_DIR = r"D:\Arvin\A-MBPAC\output"
 OUTPUT_ROOT = r"E:\ARVIN\A-MBPAC\output"
 
-MANUAL_TEST_IMAGE_PATH = r"E:\ARVIN\A-MBPAC\images\V1.1_test\WhatsApp Image 2025-12-18 at 10.57.44 AM (2).jpeg"
+MANUAL_TEST_IMAGE_PATH = r"D:\Arvin\A-MBPAC\images\V1.1_test\WhatsApp Image 2025-12-18 at 10.57.44 AM (1).jpeg"
 
 # Stabilization search padding (THIS is the “padding option” you asked for)
 SEARCH_PADDING_PX = 0
@@ -359,12 +359,13 @@ def process_one(test_image_path: str, cfg: dict):
             print("⚠️ ROI stabilization failed:", info)
 
     # Detect baseplate in moved ROI
+    # Detect baseplate in moved ROI
     cropped_test, roi_for_detection = _safe_crop(full_test_img, roi_for_detection)
 
-    test_center_rel, test_angle, test_cnt_rel = detect_baseplate(
+    ret = detect_baseplate(
         cropped_test,
-        full_image=full_test_img,
-        roi=roi_for_detection,
+        full_image_bgr=full_test_img,
+        roi_xywh_abs=roi_for_detection,
         padding=150,
         shrink_border_px=10,
         canny_low=50,
@@ -372,7 +373,14 @@ def process_one(test_image_path: str, cfg: dict):
         area_min_frac=0.005,
         contrast_min=6.0,
         border_margin=12,
+        return_debug=False,
     )
+
+    test_center_rel, test_angle, test_cnt_rel = ret[:3]
+    dbg = ret[3] if len(ret) > 3 else None
+
+    test_center_rel, test_angle, test_cnt_rel = ret[:3]
+    dbg = ret[3] if len(ret) > 3 else None
 
     if test_center_rel is None:
         print("❌ Baseplate not detected.")

@@ -1,4 +1,4 @@
-# roi_stablizer.py
+# roi_stablizer.py (REWRITE)
 import numpy as np
 import cv2
 import detector
@@ -9,10 +9,10 @@ import detector
 # ----------------------------
 def _roi_pad(roi, pad, W, H):
     x, y, w, h = map(int, roi)
-    x2 = max(0, x - pad)
-    y2 = max(0, y - pad)
-    w2 = min(W - x2, w + 2 * pad)
-    h2 = min(H - y2, h + 2 * pad)
+    x2 = max(0, x - int(pad))
+    y2 = max(0, y - int(pad))
+    w2 = min(W - x2, w + 2 * int(pad))
+    h2 = min(H - y2, h + 2 * int(pad))
     return (x2, y2, w2, h2)
 
 
@@ -45,10 +45,12 @@ def _point_on_line_at_y(line, y_target):
 # ----------------------------
 # Anchors
 # ----------------------------
-def _extract_anchors_from_lines(lines_abs, y_top_ref):
+def _extract_anchors_from_lines(lines_abs, y_top_ref_abs):
     """
-    Build anchors from left/right/bottom lines.
-    y_top_ref: the y-value at which we sample left_top/right_top.
+    Anchors from left/right/bottom lines:
+      - left_top at y=y_top_ref_abs
+      - right_top at y=y_top_ref_abs
+      - notch_bottom_left = intersection(left, bottom)
     """
     if not isinstance(lines_abs, dict):
         return None
@@ -60,8 +62,8 @@ def _extract_anchors_from_lines(lines_abs, y_top_ref):
     right = lines_abs["right"]
     bottom = lines_abs["bottom"]
 
-    left_top = _point_on_line_at_y(left, y_top_ref)
-    right_top = _point_on_line_at_y(right, y_top_ref)
+    left_top = _point_on_line_at_y(left, y_top_ref_abs)
+    right_top = _point_on_line_at_y(right, y_top_ref_abs)
 
     notch_bottom_left = _line_intersection(left, bottom)
     if notch_bottom_left is None:
@@ -117,43 +119,51 @@ def apply_affine_to_roi(M, roi_xywh):
 
 
 # ----------------------------
-# Main API
+# Main API (stable y_top handling)
 # ----------------------------
 def stabilize_rois_using_saved_inner_border_lines(
     *,
     current_img,
     golden_img,
     registration_roi_golden,
-    golden_inner_lines_abs,   # dict with left/right/bottom (ABS in golden image)
-    rois_golden,
+    golden_inner_lines_abs,     # dict with left/right/bottom in golden ABS coords
+    rois_golden,                # list of ROIs in golden ABS coords
     search_padding_px=120,
     canny_low=60,
     canny_high=140,
+    # NEW: instead of pinning to golden absolute y, tie it to ROI-top with an offset
+    y_top_offset_px=0.0,        # anchor-sampling y = ROI_top + offset (default: ROI_top)
 ):
     """
-    1) Use SAVED golden inner lines -> golden anchors
+    1) Use saved golden inner lines -> golden anchors
     2) Detect current inner lines in a padded search ROI
-    3) Compute current anchors using the SAME y_top reference as golden (registration_roi_golden[1])
+    3) Use y_top_ref tied to current search ROI top (NOT golden absolute y):
+          y_top_ref_g = reg_roi_top_g + y_top_offset
+          y_top_ref_c = reg_search_top_c + y_top_offset
     4) Estimate affine partial (similarity-ish) golden->current
-    5) Apply to given ROIs (in golden coords)
+    5) Apply to ROIs
     """
+    if current_img is None or golden_img is None:
+        return None, {"ok": False, "reason": "missing_images"}
+
     Hc, Wc = current_img.shape[:2]
 
-    # --- Golden anchors ---
+    # --- Read golden lines safely ---
     try:
         lines_g = {k: tuple(map(float, golden_inner_lines_abs[k])) for k in ("left", "right", "bottom")}
     except Exception:
         return None, {"ok": False, "reason": "bad_golden_inner_lines_abs"}
 
-    # Use golden registration ROI top as the canonical y_top reference
-    y_top_ref = float(registration_roi_golden[1])
+    reg_g = tuple(map(int, registration_roi_golden))
+    y_top_ref_g = float(reg_g[1]) + float(y_top_offset_px)
 
-    anchors_g = _extract_anchors_from_lines(lines_g, y_top_ref)
+    anchors_g = _extract_anchors_from_lines(lines_g, y_top_ref_g)
     if anchors_g is None:
-        return None, {"ok": False, "reason": "golden_anchors_failed"}
+        return None, {"ok": False, "reason": "golden_anchors_failed", "y_top_ref_g": y_top_ref_g}
 
-    # --- Current detection search ROI (ABS in current) ---
-    reg_search = _roi_pad(registration_roi_golden, search_padding_px, Wc, Hc)
+    # --- Current detection search ROI ---
+    reg_search = _roi_pad(reg_g, search_padding_px, Wc, Hc)
+    y_top_ref_c = float(reg_search[1]) + float(y_top_offset_px)
 
     res_c = detector.detect_inner_border_lines_edges_local(
         current_img,
@@ -169,19 +179,21 @@ def stabilize_rois_using_saved_inner_border_lines(
         return None, {
             "ok": False,
             "reason": f"current_inner_failed:{res_c.get('reason')}",
-            "registration_roi_golden": tuple(map(int, registration_roi_golden)),
-            "search_roi_current": tuple(map(int, reg_search)),
+            "registration_roi_golden": reg_g,
+            "search_roi_current": reg_search,
+            "y_top_ref_c": y_top_ref_c,
             "current_lines_debug": res_c,
         }
 
     lines_c = res_c.get("lines", None)
-    anchors_c = _extract_anchors_from_lines(lines_c, y_top_ref)
+    anchors_c = _extract_anchors_from_lines(lines_c, y_top_ref_c)
     if anchors_c is None:
         return None, {
             "ok": False,
             "reason": "current_anchors_failed",
-            "registration_roi_golden": tuple(map(int, registration_roi_golden)),
-            "search_roi_current": tuple(map(int, reg_search)),
+            "registration_roi_golden": reg_g,
+            "search_roi_current": reg_search,
+            "y_top_ref_c": y_top_ref_c,
             "current_lines_debug": res_c,
         }
 
@@ -191,8 +203,10 @@ def stabilize_rois_using_saved_inner_border_lines(
         return None, {
             "ok": False,
             "reason": "transform_failed",
-            "registration_roi_golden": tuple(map(int, registration_roi_golden)),
-            "search_roi_current": tuple(map(int, reg_search)),
+            "registration_roi_golden": reg_g,
+            "search_roi_current": reg_search,
+            "y_top_ref_g": y_top_ref_g,
+            "y_top_ref_c": y_top_ref_c,
             "anchors_golden": anchors_g,
             "anchors_current": anchors_c,
             "current_lines_debug": res_c,
@@ -205,12 +219,13 @@ def stabilize_rois_using_saved_inner_border_lines(
         "reason": "ok",
         "M": M.tolist(),
         "inliers": None if inliers is None else inliers.astype(int).flatten().tolist(),
-        "registration_roi_golden": tuple(map(int, registration_roi_golden)),
-        "search_roi_current": tuple(map(int, reg_search)),
-        "y_top_ref": y_top_ref,
+        "registration_roi_golden": reg_g,
+        "search_roi_current": reg_search,
+        "y_top_ref_g": y_top_ref_g,
+        "y_top_ref_c": y_top_ref_c,
         "anchors_golden": anchors_g,
         "anchors_current": anchors_c,
         "golden_lines_abs": lines_g,
-        "current_lines_debug": res_c,  # has hull_abs, points_used_abs, lines, etc.
+        "current_lines_debug": res_c,  # hull_abs, points_used_abs, lines, etc
     }
     return moved, info

@@ -1,0 +1,61 @@
+{
+    "golden_image_path": "C:\\Users\\m.afrazeh\\PycharmProjects\\VenusGlass-A-MBPAC\\recipes\\C270TEST_207\\golden.jpg",
+    "roi": [
+        513,
+        348,
+        211,
+        244
+    ],
+    "expected_center": [
+        107.61544799804688,
+        114.53720092773438
+    ],
+    "expected_angle": 0.0,
+    "tolerance_px": {
+        "x": 10,
+        "y": 10,
+        "angle": 5
+    },
+    "registration_roi": [
+        133,
+        270,
+        957,
+        452
+    ],
+    "baseplate_roi": [
+        513,
+        348,
+        211,
+        244
+    ],
+    "inner_border_lines_used": [
+        "left",
+        "right",
+        "bottom"
+    ],
+    "inner_border_lines": {
+        "left": [
+            0.5172005295753479,
+            0.8558642268180847,
+            256.55835723876953,
+            422.950927734375
+        ],
+        "right": [
+            0.4811543822288513,
+            -0.8766358494758606,
+            962.533203125,
+            460.13255310058594
+        ],
+        "bottom": [
+            0.9999895095825195,
+            0.004580513574182987,
+            597.9765625,
+            678.3217163085938
+        ]
+    },
+    "expected_center_in_baseplate_roi": [
+        107.61544799804688,
+        114.53720092773438
+    ],
+    "baseplate_center_source": "auto"
+}
