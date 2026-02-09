@@ -13,3 +13,14 @@ env/
 # Other files you don’t want to track
 *.log
 *.sqlite3
+
+# Runtime / test artifacts
+images/
+incoming/
+output/
+
+# Camera captures
+*.jpg
+*.png
+*.jpeg
+
