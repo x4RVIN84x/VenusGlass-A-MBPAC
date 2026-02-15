@@ -1,20 +1,25 @@
 from __future__ import annotations
-from PySide6.QtCore import QTimer
+
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel, QPushButton, QCheckBox, QSlider
-from PySide6.QtCore import Qt
 
 from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
 from hmi_app.core.engine import QCPreviewEngine
 
+
 class AutoPage(QWidget):
-    def __init__(self, engine: QCPreviewEngine, parent=None):
+    def __init__(self, engine: QCPreviewEngine, cam: OpenCVCamera | None = None, parent=None):
         super().__init__(parent)
         self.engine = engine
-        self.cam = OpenCVCamera(index=0, width=1280, height=720, fps=30, use_dshow=True)
+        self.cam = cam
+        self._owns_cam = cam is None
+
+        if self.cam is None:
+            self.cam = OpenCVCamera(index=0, width=1280, height=720, fps=30, use_dshow=True)
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(0,0,0,0)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
         self.view = ImageView()
@@ -92,6 +97,7 @@ class AutoPage(QWidget):
         if not ok or frame is None:
             self.lbl_status.setText("Status: CAMERA READ FAIL")
             return
+
         # If no recipe loaded, just show raw feed (fast) + don’t run pipeline
         if self.engine.recipe is None:
             self.view.set_bgr(frame)
@@ -109,6 +115,7 @@ class AutoPage(QWidget):
 
     def close(self):
         try:
-            self.cam.release()
+            if self._owns_cam and self.cam is not None:
+                self.cam.release()
         except Exception:
             pass

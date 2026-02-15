@@ -57,5 +57,12 @@
         107.61544799804688,
         114.53720092773438
     ],
-    "baseplate_center_source": "auto"
+    "baseplate_center_source": "auto",
+    "canny_low": 50,
+    "canny_high": 115,
+    "blur_ksize": 5,
+    "clahe_clip": 1.5,
+    "dilate_iter": 1,
+    "close_iter": 1,
+    "contrast_min": 6.0
 }
