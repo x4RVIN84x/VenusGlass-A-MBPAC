@@ -30,8 +30,7 @@
     ],
     "inner_border_lines_used": [
         "left",
-        "right",
-        "bottom"
+        "right"
     ],
     "inner_border_lines": {
         "left": [
@@ -58,11 +57,11 @@
         114.53720092773438
     ],
     "baseplate_center_source": "auto",
-    "canny_low": 50,
-    "canny_high": 115,
-    "blur_ksize": 5,
+    "canny_low": 60,
+    "canny_high": 150,
+    "blur_ksize": 7,
     "clahe_clip": 1.5,
     "dilate_iter": 1,
-    "close_iter": 1,
-    "contrast_min": 6.0
+    "close_iter": 2,
+    "contrast_min": 5
 }

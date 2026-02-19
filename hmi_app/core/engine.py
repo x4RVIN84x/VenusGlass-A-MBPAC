@@ -126,14 +126,16 @@ class QCPreviewEngine:
             and (self._frame_i % int(self.settings.stab_every_n) == 0)
         ):
             moved, info = roi_stablizer.stabilize_rois_using_saved_inner_border_lines(
-                current_img=raw,
+                current_img=frame_bgr,
                 golden_img=golden,
                 registration_roi_golden=registration_roi_golden,
                 golden_inner_lines_abs=golden_lines,
                 rois_golden=[roi_cfg],
                 search_padding_px=int(self.settings.search_padding_px),
-                canny_low=60,
-                canny_high=140,
+
+                # pull from recipe cfg (with sane fallbacks)
+                canny_low=int(cfg.get("canny_low", 60)),
+                canny_high=int(cfg.get("canny_high", 140)),
             )
             self._stab_info = info
             if moved is not None and info and info.get("ok"):
