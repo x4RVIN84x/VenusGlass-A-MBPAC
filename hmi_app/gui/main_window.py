@@ -28,7 +28,16 @@ from hmi_app.gui.pages.placeholder import PlaceholderPage
 
 
 class MainWindow(QMainWindow):
-    AUTO_CONTROLS_FIXED_W = 380
+    """
+    Main app shell.
+
+    Important terminology cleanup:
+      - The top dropdown is the PRODUCT / RECIPE selector.
+      - There is no separate active config concept anymore.
+      - One recipe folder == one complete product definition.
+    """
+
+    AUTO_CONTROLS_FIXED_W = 420
 
     def __init__(self):
         super().__init__()
@@ -45,7 +54,7 @@ class MainWindow(QMainWindow):
         self.recipe_manager = RecipeManager(recipes_root=str(recipes_path))
         self.engine = QCPreviewEngine()
 
-        # Shared camera for ALL pages (no conflicts)
+        # Shared camera for all pages.
         self.cam = OpenCVCamera(index=0, width=1280, height=720, fps=30, use_dshow=True)
 
         root = QWidget()
@@ -67,8 +76,9 @@ class MainWindow(QMainWindow):
         lbl_title = QLabel("MBPAC QC Station")
         lbl_title.setStyleSheet("font-size: 18px; font-weight: 900;")
 
-        lbl_recipe = QLabel("Recipe/Car:")
+        lbl_recipe = QLabel("Product/Recipe:")
         self.cmb_recipe = QComboBox()
+        self.cmb_recipe.setMinimumWidth(240)
 
         self.badge = QLabel("IDLE")
         self.badge.setAlignment(Qt.AlignCenter)
@@ -92,7 +102,6 @@ class MainWindow(QMainWindow):
         top_lay.addWidget(lbl_recipe)
         top_lay.addWidget(self.cmb_recipe, 0)
         top_lay.addWidget(self.badge, 0)
-
         outer.addWidget(top)
 
         # =========================
@@ -124,7 +133,12 @@ class MainWindow(QMainWindow):
         body.addWidget(self.stack, 1)
 
         # Real pages
-        self.page_cal = CalibrationPage(engine=self.engine, recipe_manager=self.recipe_manager, cam=self.cam)
+        self.page_cal = CalibrationPage(
+            engine=self.engine,
+            recipe_manager=self.recipe_manager,
+            cam=self.cam,
+            on_products_changed=self.refresh_product_list,
+        )
         self.page_manual = ManualTestPage(engine=self.engine, recipe_manager=self.recipe_manager, cam=self.cam)
         self.page_auto = AutoPage(engine=self.engine, cam=self.cam)
         self.page_reports = PlaceholderPage("Reports (coming next)")
@@ -144,7 +158,8 @@ class MainWindow(QMainWindow):
         # =========================
         # Recipe wiring
         # =========================
-        self._load_recipe_list()
+        self._loading_products = False
+        self.refresh_product_list()
         self.cmb_recipe.currentTextChanged.connect(self.on_recipe_changed)
 
         if self.cmb_recipe.count() > 0:
@@ -156,16 +171,36 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, self._stabilize_auto_layout)
 
-    def _load_recipe_list(self):
+    # -------------------------
+    # Product list/load
+    # -------------------------
+    def refresh_product_list(self, select_name: str | None = None):
+        current = (select_name or self.cmb_recipe.currentText() or "").strip()
+
+        self._loading_products = True
         self.cmb_recipe.blockSignals(True)
         try:
             self.cmb_recipe.clear()
-            for r in self.recipe_manager.list_recipes():
-                self.cmb_recipe.addItem(r)
+            products = self.recipe_manager.list_recipes()
+            for p in products:
+                self.cmb_recipe.addItem(p)
+
+            if products:
+                if current in products:
+                    self.cmb_recipe.setCurrentText(current)
+                else:
+                    self.cmb_recipe.setCurrentIndex(0)
         finally:
             self.cmb_recipe.blockSignals(False)
+            self._loading_products = False
+
+        if self.cmb_recipe.count() > 0:
+            self.on_recipe_changed(self.cmb_recipe.currentText())
 
     def on_recipe_changed(self, name: str):
+        if self._loading_products:
+            return
+
         name = (name or "").strip()
         if not name:
             self.engine.recipe = None
@@ -176,17 +211,27 @@ class MainWindow(QMainWindow):
             recipe = self.recipe_manager.load(name)
             self.engine.set_recipe(recipe)
             self.set_state("READY")
-            print(f"[HMI] loaded recipe: {name}")
+            print(f"[HMI] loaded product/recipe: {recipe.name}")
 
-            # notify pages so they reload their config dropdowns
-            self.page_cal.set_recipe_name(name)
-            self.page_manual.set_recipe_name(name)
+            # Notify pages.
+            try:
+                self.page_cal.set_recipe_name(name)
+            except Exception as e:
+                print("[HMI] page_cal.set_recipe_name failed:", e)
+
+            try:
+                self.page_manual.set_recipe_name(name)
+            except Exception as e:
+                print("[HMI] page_manual.set_recipe_name failed:", e)
 
         except Exception as e:
             self.engine.recipe = None
             self.set_state("FAULT")
-            print(f"[HMI] failed to load recipe {name}: {e}")
+            print(f"[HMI] failed to load product/recipe {name}: {e}")
 
+    # -------------------------
+    # State badge
+    # -------------------------
     def set_state(self, text: str):
         colors = {
             "IDLE": "#2a2a2e",
@@ -210,9 +255,9 @@ class MainWindow(QMainWindow):
                 """
             )
 
-        if hasattr(self, "lbl_state") and self.lbl_state is not None:
-            self.lbl_state.setText(text)
-
+    # -------------------------
+    # Layout stabilization
+    # -------------------------
     def _stabilize_auto_layout(self):
         try:
             page = getattr(self, "page_auto", None)
@@ -229,11 +274,19 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print("[HMI] _stabilize_auto_layout error:", e)
 
+    # -------------------------
+    # Shutdown
+    # -------------------------
     def closeEvent(self, event):
         try:
-            # stop auto page timer if running
             if getattr(self, "page_auto", None) is not None:
                 self.page_auto.stop()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "page_cal", None) is not None:
+                self.page_cal.stop_preview()
         except Exception:
             pass
 

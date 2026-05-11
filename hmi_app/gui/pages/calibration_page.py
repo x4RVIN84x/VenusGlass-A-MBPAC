@@ -2,18 +2,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Callable
 
 import cv2
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QVBoxLayout, QGroupBox, QLabel,
-    QPushButton, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox,
-    QRadioButton, QButtonGroup, QSizePolicy, QScrollArea
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QGroupBox,
+    QLabel,
+    QPushButton,
+    QLineEdit,
+    QSpinBox,
+    QDoubleSpinBox,
+    QRadioButton,
+    QButtonGroup,
+    QSizePolicy,
+    QScrollArea,
 )
+
+from detector import detect_baseplate
 
 from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
@@ -22,10 +35,18 @@ from hmi_app.core.recipe_manager import RecipeManager
 
 
 def _safe_write_json(path: str, data: dict):
-    tmp = path + ".tmp"
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp = str(p) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
-    os.replace(tmp, path)
+    os.replace(tmp, str(p))
+
+
+def _safe_load_json(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _lab(txt: str) -> QLabel:
@@ -34,24 +55,59 @@ def _lab(txt: str) -> QLabel:
     return l
 
 
+def _sanitize_product_name(name: str) -> str:
+    name = (name or "").strip()
+    name = name.replace(" ", "_")
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+    name = name.strip("._-")
+    return name
+
+
+def _copy_first_existing_golden(src_dir: Path, dst_dir: Path) -> bool:
+    for n in ("golden.png", "golden.jpg", "golden.jpeg"):
+        src = src_dir / n
+        if src.is_file():
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(src), str(dst_dir / "golden.png"))
+            return True
+    return False
+
+
+def _clamp_roi(roi, W: int, H: int):
+    x, y, w, h = map(int, roi)
+
+    x = max(0, min(x, W - 1))
+    y = max(0, min(y, H - 1))
+    w = max(1, min(w, W - x))
+    h = max(1, min(h, H - y))
+
+    return x, y, w, h
+
+
 class CalibrationPage(QWidget):
     """
-    Calibration:
-      - config dropdown + create/duplicate/active
-      - capture golden into config folder
-      - tuning saved into golden_config.json
-      - live preview RAW/PROC/OVERLAY (PROC uses engine.proc_bgr)
+    Product calibration page.
+
+    Flat product workflow:
+
+      recipes/<PRODUCT_NAME>/
+        golden_config.json
+        golden.png
+
+    CAPTURE GOLDEN + SET EXPECTED:
+      - saves golden.png
+      - detects baseplate in the current frame
+      - saves expected_center
+      - saves expected_angle
+      - reloads product
     """
 
-    # Right panel sizing (responsive but clamped)
     RIGHT_W_FRAC = 0.30
     RIGHT_W_MIN = 420
     RIGHT_W_MAX = 620
 
-    # Input safety (prevents eliding "...")
     INPUT_MIN_W = 180
 
-    # Panel background color (match dark theme)
     PANEL_BG = "#0f1014"
     INPUT_BG = "#121318"
     BORDER = "#2c2f3a"
@@ -65,35 +121,35 @@ class CalibrationPage(QWidget):
         engine: QCPreviewEngine,
         recipe_manager: RecipeManager,
         cam: Optional[OpenCVCamera] = None,
+        on_products_changed: Optional[Callable[..., None]] = None,
         parent=None,
     ):
         super().__init__(parent)
+
         self.engine = engine
         self.recipe_manager = recipe_manager
         self.cam = cam
+        self.on_products_changed = on_products_changed
         self._owns_cam = cam is None
 
         if self.cam is None:
             self.cam = OpenCVCamera(index=0, width=1280, height=720, fps=30, use_dshow=True)
 
-        self._current_recipe_name: str = ""
+        self._current_product_name: str = ""
         self._last_frame_bgr = None
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick_preview)
 
-        # Root layout
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
-        # Left: video/image view
         self.view = ImageView()
         self.view.setMinimumWidth(240)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root.addWidget(self.view, 1)
 
-        # Right: scroll area
         self.controls_container = QWidget()
         self.controls_layout = QVBoxLayout(self.controls_container)
         self.controls_layout.setContentsMargins(10, 10, 10, 10)
@@ -107,7 +163,6 @@ class CalibrationPage(QWidget):
         self.scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         root.addWidget(self.scroll, 0)
 
-        # Apply styling: (A) dark scroll viewport + container background
         self.scroll.setStyleSheet(f"""
             QScrollArea {{
                 background: transparent;
@@ -117,17 +172,15 @@ class CalibrationPage(QWidget):
                 background: {self.PANEL_BG};
             }}
         """)
+
         self.controls_container.setStyleSheet(f"background: {self.PANEL_BG};")
 
-        # Build UI
-        self._build_config_group()
+        self._build_product_group()
         self._build_preview_group()
         self._build_tuning_group()
 
         self.controls_layout.addStretch(1)
 
-        # Apply input/label styling ONLY inside controls container
-        # (Do NOT change generic QWidget background here.)
         self.controls_container.setStyleSheet(self.controls_container.styleSheet() + f"""
             QLabel {{
                 color: {self.LABEL};
@@ -143,55 +196,48 @@ class CalibrationPage(QWidget):
                 selection-background-color: {self.FOCUS};
                 selection-color: #ffffff;
             }}
+
             QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
                 border: 1px solid {self.FOCUS};
             }}
-            QComboBox QAbstractItemView {{
-                background: {self.INPUT_BG};
-                color: {self.TEXT};
-                selection-background-color: {self.FOCUS};
-                selection-color: #ffffff;
-            }}
         """)
 
-        # Initial sizing
         self._update_right_width()
-
-        # Default view mode
         self._apply_view_mode()
 
     # -------------------------
     # Build UI sections
     # -------------------------
-    def _build_config_group(self):
-        gb = QGroupBox("Config Management")
+    def _build_product_group(self):
+        gb = QGroupBox("Product Management")
         gb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         vb = QVBoxLayout(gb)
         vb.setSpacing(8)
 
-        vb.addWidget(_lab("Config:"))
-        self.cmb_config = QComboBox()
-        self.cmb_config.setMinimumWidth(self.INPUT_MIN_W)
-        vb.addWidget(self.cmb_config)
+        vb.addWidget(_lab("Current product:"))
+        self.lbl_product = QLabel("—")
+        self.lbl_product.setStyleSheet("font-size: 13px; font-weight: 900;")
+        vb.addWidget(self.lbl_product)
 
         row = QHBoxLayout()
         self.ed_new_name = QLineEdit()
-        self.ed_new_name.setPlaceholderText("new_config_name")
+        self.ed_new_name.setPlaceholderText("new_product_name")
         self.ed_new_name.setMinimumWidth(self.INPUT_MIN_W)
-        self.btn_create = QPushButton("CREATE")
+        self.btn_create = QPushButton("CREATE PRODUCT")
         row.addWidget(self.ed_new_name, 1)
         row.addWidget(self.btn_create, 0)
         vb.addLayout(row)
 
-        self.btn_dup = QPushButton("DUPLICATE FROM SELECTED")
+        self.btn_dup = QPushButton("DUPLICATE SELECTED PRODUCT")
         vb.addWidget(self.btn_dup)
 
-        self.btn_set_active = QPushButton("SET AS ACTIVE")
-        vb.addWidget(self.btn_set_active)
-
-        self.btn_capture = QPushButton("CAPTURE GOLDEN (save)")
-        self.btn_capture.setMinimumHeight(52)
+        self.btn_capture = QPushButton("CAPTURE GOLDEN + SET EXPECTED")
+        self.btn_capture.setMinimumHeight(58)
         vb.addWidget(self.btn_capture)
+
+        self.lbl_expected = QLabel("Expected: —")
+        self.lbl_expected.setStyleSheet("font-size: 12px; font-weight: 800;")
+        vb.addWidget(self.lbl_expected)
 
         self.lbl_cfg_status = QLabel("Status: IDLE")
         self.lbl_cfg_status.setStyleSheet("font-size: 13px; font-weight: 900;")
@@ -199,12 +245,9 @@ class CalibrationPage(QWidget):
 
         self.controls_layout.addWidget(gb)
 
-        # wiring
-        self.cmb_config.currentTextChanged.connect(self._on_config_changed)
-        self.btn_create.clicked.connect(self.create_new_config)
-        self.btn_dup.clicked.connect(self.duplicate_selected_config)
-        self.btn_set_active.clicked.connect(self.set_active_config)
-        self.btn_capture.clicked.connect(self.capture_golden)
+        self.btn_create.clicked.connect(self.create_new_product)
+        self.btn_dup.clicked.connect(self.duplicate_selected_product)
+        self.btn_capture.clicked.connect(self.capture_golden_and_expected)
 
     def _build_preview_group(self):
         gb = QGroupBox("Preview")
@@ -231,13 +274,12 @@ class CalibrationPage(QWidget):
 
         self.controls_layout.addWidget(gb)
 
-        # wiring
         self.grp_view.buttonClicked.connect(self._apply_view_mode)
         self.btn_preview_start.clicked.connect(self.start_preview)
         self.btn_preview_stop.clicked.connect(self.stop_preview)
 
     def _build_tuning_group(self):
-        gb = QGroupBox("Preprocess Tuning (saved to golden_config.json)")
+        gb = QGroupBox("Product Tuning (saved to golden_config.json)")
         gb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         vb = QVBoxLayout(gb)
         vb.setSpacing(8)
@@ -289,7 +331,7 @@ class CalibrationPage(QWidget):
         self.sp_contrast.setMinimumWidth(self.INPUT_MIN_W)
         vb.addWidget(self.sp_contrast)
 
-        self.btn_save = QPushButton("SAVE CONFIG JSON")
+        self.btn_save = QPushButton("SAVE PRODUCT JSON")
         vb.addWidget(self.btn_save)
 
         self.lbl_save = QLabel("Saved: —")
@@ -297,8 +339,7 @@ class CalibrationPage(QWidget):
 
         self.controls_layout.addWidget(gb)
 
-        # wiring
-        self.btn_save.clicked.connect(self.save_config_json)
+        self.btn_save.clicked.connect(self.save_product_json)
 
     # -------------------------
     # Responsive sizing
@@ -315,53 +356,58 @@ class CalibrationPage(QWidget):
         self._update_right_width()
 
     # -------------------------
-    # External wiring
+    # External wiring from MainWindow
     # -------------------------
     def set_recipe_name(self, recipe_name: str):
-        self._current_recipe_name = (recipe_name or "").strip()
-        self._reload_configs()
+        self._current_product_name = (recipe_name or "").strip()
+        self.lbl_product.setText(self._current_product_name or "—")
+        self._reload_current_product()
 
-    def _reload_configs(self):
-        self.cmb_config.blockSignals(True)
-        try:
-            self.cmb_config.clear()
-            if not self._current_recipe_name:
-                self.lbl_cfg_status.setText("Status: NO RECIPE")
-                return
-
-            configs = self.recipe_manager.list_configs(self._current_recipe_name)
-            if configs:
-                for c in configs:
-                    self.cmb_config.addItem(c)
-                active = self.recipe_manager.get_active_config_name(self._current_recipe_name)
-                if active and active in configs:
-                    self.cmb_config.setCurrentText(active)
-                else:
-                    self.cmb_config.setCurrentIndex(0)
-            else:
-                self.cmb_config.addItem("legacy")
-                self.cmb_config.setCurrentIndex(0)
-        finally:
-            self.cmb_config.blockSignals(False)
-
-        self._on_config_changed(self.cmb_config.currentText())
-
-    def _on_config_changed(self, name: str):
-        name = (name or "").strip()
-        if not self._current_recipe_name:
+    def _reload_current_product(self):
+        if not self._current_product_name:
+            self.lbl_cfg_status.setText("Status: NO PRODUCT")
             return
 
         try:
-            if name and name != "legacy":
-                recipe = self.recipe_manager.load(self._current_recipe_name, config_name=name)
-            else:
-                recipe = self.recipe_manager.load(self._current_recipe_name)
-
+            recipe = self.recipe_manager.load(self._current_product_name)
             self.engine.set_recipe(recipe)
             self._load_tuning_from_cfg()
-            self.lbl_cfg_status.setText("Status: READY")
+            self._update_expected_label()
+            self.lbl_cfg_status.setText(f"Status: READY ({recipe.name})")
         except Exception as e:
             self.lbl_cfg_status.setText(f"Status: LOAD FAIL: {e}")
+
+    def _notify_products_changed(self, select_name: Optional[str] = None):
+        if callable(self.on_products_changed):
+            try:
+                self.on_products_changed(select_name=select_name)
+                return
+            except TypeError:
+                try:
+                    self.on_products_changed(select_name)
+                    return
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        w = self.window()
+        if w is None:
+            return
+
+        for fn_name in ("reload_products", "refresh_recipe_list", "refresh_config_selectors"):
+            fn = getattr(w, fn_name, None)
+            if callable(fn):
+                try:
+                    fn(select_name=select_name)
+                except TypeError:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                return
 
     # -------------------------
     # View mode
@@ -383,6 +429,7 @@ class CalibrationPage(QWidget):
     def start_preview(self):
         if self._timer.isActive():
             return
+
         self._timer.start(33)
         self.btn_preview_start.setEnabled(False)
         self.btn_preview_stop.setEnabled(True)
@@ -391,6 +438,7 @@ class CalibrationPage(QWidget):
     def stop_preview(self):
         if not self._timer.isActive():
             return
+
         self._timer.stop()
         self.btn_preview_start.setEnabled(True)
         self.btn_preview_stop.setEnabled(False)
@@ -398,6 +446,7 @@ class CalibrationPage(QWidget):
 
     def _tick_preview(self):
         ok, frame = self.cam.read()
+
         if not ok or frame is None:
             self.lbl_cfg_status.setText("Status: CAMERA READ FAIL")
             return
@@ -409,6 +458,7 @@ class CalibrationPage(QWidget):
             return
 
         out = self.engine.process_frame(frame)
+
         mode = (self.engine.settings.view_mode or "OVERLAY").upper()
 
         if mode == "RAW" and out.raw_bgr is not None:
@@ -419,144 +469,266 @@ class CalibrationPage(QWidget):
             self.view.set_bgr(out.overlay_bgr)
 
     # -------------------------
-    # Config folder ops
+    # Product filesystem helpers
     # -------------------------
-    def _configs_dir(self) -> Optional[Path]:
-        if not self._current_recipe_name:
-            return None
-        return Path(self.recipe_manager.recipes_root) / self._current_recipe_name / "configs"
+    def _products_root(self) -> Path:
+        return Path(self.recipe_manager.recipes_root)
 
-    def create_new_config(self):
-        if not self._current_recipe_name:
-            return
+    def _base_cfg_for_new_product(self) -> dict:
+        if self.engine.recipe is not None:
+            cfg = dict(self.engine.recipe.cfg)
+        else:
+            cfg = {}
 
-        new_name = (self.ed_new_name.text() or "").strip()
-        if not new_name:
-            self.lbl_cfg_status.setText("Status: ENTER CONFIG NAME")
-            return
+        cfg["golden_image_path"] = "golden.png"
+        cfg.setdefault("prefer_solid_edge", True)
+        cfg.setdefault("hysteresis_enabled", True)
+        cfg.setdefault("roi", [0, 0, 100, 100])
+        cfg.setdefault("registration_roi", cfg.get("roi", [0, 0, 100, 100]))
+        cfg.setdefault("expected_center", [50.0, 50.0])
+        cfg.setdefault("expected_angle", 0.0)
 
-        cfgs_dir = self._configs_dir()
-        if cfgs_dir is None:
-            return
+        return cfg
 
-        cfgs_dir.mkdir(parents=True, exist_ok=True)
-        dst = cfgs_dir / new_name
-        if dst.exists():
-            self.lbl_cfg_status.setText("Status: CONFIG EXISTS")
-            return
-
-        dst.mkdir(parents=True, exist_ok=True)
-
-        base_cfg = dict(self.engine.recipe.cfg) if self.engine.recipe is not None else {}
-        base_cfg["golden_image_path"] = "golden.png"
-        _safe_write_json(str(dst / "golden_config.json"), base_cfg)
+    def _write_golden_for_new_product(self, dst_dir: Path) -> bool:
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        golden_dst = dst_dir / "golden.png"
 
         if self._last_frame_bgr is not None:
-            cv2.imwrite(str(dst / "golden.png"), self._last_frame_bgr)
+            return bool(cv2.imwrite(str(golden_dst), self._last_frame_bgr))
 
-        self.ed_new_name.setText("")
-        self._reload_configs()
-        self.cmb_config.setCurrentText(new_name)
-        self.recipe_manager.set_active_config_name(self._current_recipe_name, new_name)
-        self.lbl_cfg_status.setText("Status: CREATED")
+        if self.engine.recipe is not None and self.engine.recipe.golden_bgr is not None:
+            return bool(cv2.imwrite(str(golden_dst), self.engine.recipe.golden_bgr))
 
-    def duplicate_selected_config(self):
-        if not self._current_recipe_name:
-            return
+        if self.engine.recipe is not None:
+            src_dir = Path(self.engine.recipe.recipe_dir)
+            if _copy_first_existing_golden(src_dir, dst_dir):
+                return True
 
-        src_name = (self.cmb_config.currentText() or "").strip()
-        new_name = (self.ed_new_name.text() or "").strip()
+        return False
+
+    # -------------------------
+    # Product ops
+    # -------------------------
+    def create_new_product(self):
+        new_name = _sanitize_product_name(self.ed_new_name.text())
 
         if not new_name:
-            self.lbl_cfg_status.setText("Status: ENTER NEW NAME")
-            return
-        if not src_name or src_name == "legacy":
-            self.lbl_cfg_status.setText("Status: SELECT NON-LEGACY CONFIG")
+            self.lbl_cfg_status.setText("Status: ENTER VALID PRODUCT NAME")
             return
 
-        cfgs_dir = self._configs_dir()
-        if cfgs_dir is None:
-            return
+        root = self._products_root()
+        root.mkdir(parents=True, exist_ok=True)
 
-        src = cfgs_dir / src_name
-        dst = cfgs_dir / new_name
+        dst = root / new_name
+
         if dst.exists():
-            self.lbl_cfg_status.setText("Status: TARGET EXISTS")
+            self.lbl_cfg_status.setText("Status: PRODUCT EXISTS")
             return
 
-        shutil.copytree(src, dst)
+        try:
+            dst.mkdir(parents=True, exist_ok=False)
 
-        self.ed_new_name.setText("")
-        self._reload_configs()
-        self.cmb_config.setCurrentText(new_name)
-        self.recipe_manager.set_active_config_name(self._current_recipe_name, new_name)
-        self.lbl_cfg_status.setText("Status: DUPLICATED")
+            cfg = self._base_cfg_for_new_product()
+            _safe_write_json(str(dst / "golden_config.json"), cfg)
 
-    def set_active_config(self):
-        if not self._current_recipe_name:
+            wrote_golden = self._write_golden_for_new_product(dst)
+
+            if not wrote_golden:
+                shutil.rmtree(dst, ignore_errors=True)
+                self.lbl_cfg_status.setText("Status: CREATE FAIL: no golden frame/image")
+                return
+
+            self.ed_new_name.setText("")
+            self._current_product_name = new_name
+            self.lbl_product.setText(new_name)
+
+            self._notify_products_changed(select_name=new_name)
+            self._reload_current_product()
+
+            self.lbl_cfg_status.setText(f"Status: CREATED PRODUCT {new_name}")
+
+        except Exception as e:
+            shutil.rmtree(dst, ignore_errors=True)
+            self.lbl_cfg_status.setText(f"Status: CREATE FAIL: {e}")
+
+    def duplicate_selected_product(self):
+        if not self._current_product_name:
+            self.lbl_cfg_status.setText("Status: NO SELECTED PRODUCT")
             return
-        name = (self.cmb_config.currentText() or "").strip()
-        if not name or name == "legacy":
-            self.lbl_cfg_status.setText("Status: SELECT CONFIG")
-            return
-        self.recipe_manager.set_active_config_name(self._current_recipe_name, name)
-        self.lbl_cfg_status.setText("Status: ACTIVE SET")
 
-    def capture_golden(self):
+        new_name = _sanitize_product_name(self.ed_new_name.text())
+
+        if not new_name:
+            self.lbl_cfg_status.setText("Status: ENTER VALID NEW NAME")
+            return
+
+        root = self._products_root()
+        src = root / self._current_product_name
+        dst = root / new_name
+
+        if not src.is_dir():
+            self.lbl_cfg_status.setText("Status: SOURCE PRODUCT MISSING")
+            return
+
+        if dst.exists():
+            self.lbl_cfg_status.setText("Status: TARGET PRODUCT EXISTS")
+            return
+
+        try:
+            shutil.copytree(src, dst)
+
+            cfg_path = dst / "golden_config.json"
+
+            if cfg_path.is_file():
+                cfg = _safe_load_json(str(cfg_path))
+            else:
+                cfg = self._base_cfg_for_new_product()
+
+            cfg["golden_image_path"] = "golden.png"
+            cfg.setdefault("prefer_solid_edge", True)
+            cfg.setdefault("hysteresis_enabled", True)
+
+            _safe_write_json(str(cfg_path), cfg)
+
+            if not (dst / "golden.png").is_file():
+                _copy_first_existing_golden(src, dst)
+
+            if not (dst / "golden.png").is_file():
+                wrote_golden = self._write_golden_for_new_product(dst)
+                if not wrote_golden:
+                    shutil.rmtree(dst, ignore_errors=True)
+                    self.lbl_cfg_status.setText("Status: DUP FAIL: no golden image")
+                    return
+
+            self.ed_new_name.setText("")
+            self._current_product_name = new_name
+            self.lbl_product.setText(new_name)
+
+            self._notify_products_changed(select_name=new_name)
+            self._reload_current_product()
+
+            self.lbl_cfg_status.setText(f"Status: DUPLICATED PRODUCT {new_name}")
+
+        except Exception as e:
+            shutil.rmtree(dst, ignore_errors=True)
+            self.lbl_cfg_status.setText(f"Status: DUP FAIL: {e}")
+
+    # -------------------------
+    # Golden capture + expected target
+    # -------------------------
+    def _detector_kwargs_from_cfg(self, cfg: dict) -> dict:
+        return dict(
+            shrink_border_px=int(cfg.get("shrink_border_px", 10)),
+            border_margin=int(cfg.get("border_margin", 12)),
+            use_clahe=bool(cfg.get("use_clahe", True)),
+            clahe_clip=float(cfg.get("clahe_clip", 1.5)),
+            clahe_grid=int(cfg.get("clahe_grid", 8)),
+            blur_ksize=int(cfg.get("blur_ksize", 5)),
+            canny_low=int(cfg.get("canny_low", 50)),
+            canny_high=int(cfg.get("canny_high", 120)),
+            dilate_iter=int(cfg.get("dilate_iter", 1)),
+            close_iter=int(cfg.get("close_iter", 1)),
+            area_min_frac=float(cfg.get("area_min_frac", 0.005)),
+            area_max_frac=float(cfg.get("area_max_frac", 0.60)),
+            aspect_min=float(cfg.get("aspect_min", 0.5)),
+            aspect_max=float(cfg.get("aspect_max", 2.2)),
+            solidity_min=float(cfg.get("solidity_min", 0.7)),
+            extent_min=float(cfg.get("extent_min", 0.25)),
+            contrast_min=float(cfg.get("contrast_min", 6.0)),
+        )
+
+    def _detect_expected_from_frame(
+        self,
+        frame_bgr,
+        cfg: dict,
+    ) -> Tuple[Optional[Tuple[float, float]], Optional[float], Optional[str]]:
+        if frame_bgr is None:
+            return None, None, "no_frame"
+
+        if "roi" not in cfg:
+            return None, None, "missing_roi"
+
+        H, W = frame_bgr.shape[:2]
+        roi = _clamp_roi(cfg["roi"], W, H)
+        x, y, w, h = roi
+
+        crop = frame_bgr[y:y + h, x:x + w].copy()
+
+        center_rel, angle, contour_rel, dbg = detect_baseplate(
+            crop,
+            full_image_bgr=frame_bgr,
+            roi_xywh_abs=roi,
+            padding=int(cfg.get("padding", 150)),
+            return_debug=True,
+            **self._detector_kwargs_from_cfg(cfg),
+        )
+
+        if center_rel is None or angle is None:
+            reason = "baseplate_not_found"
+            if isinstance(dbg, dict):
+                reason = str(dbg.get("reason", reason))
+            return None, None, reason
+
+        return (float(center_rel[0]), float(center_rel[1])), float(angle), None
+
+    def capture_golden_and_expected(self):
         if self.engine.recipe is None:
-            self.lbl_cfg_status.setText("Status: NO RECIPE LOADED")
+            self.lbl_cfg_status.setText("Status: NO PRODUCT LOADED")
             return
+
         if self._last_frame_bgr is None:
             self.lbl_cfg_status.setText("Status: NO FRAME (start preview)")
             return
 
         recipe = self.engine.recipe
+        product_dir = Path(recipe.recipe_dir)
+        product_dir.mkdir(parents=True, exist_ok=True)
+
         cfg = dict(recipe.cfg)
-
-        cfg_dir = Path(recipe.config_dir) if getattr(recipe, "config_dir", "") else Path(recipe.recipe_dir)
-        cfg_dir.mkdir(parents=True, exist_ok=True)
-
-        golden_path = cfg_dir / "golden.png"
-        cv2.imwrite(str(golden_path), self._last_frame_bgr)
-
         cfg["golden_image_path"] = "golden.png"
-        _safe_write_json(str(Path(recipe.config_path)), cfg)
+        cfg.setdefault("prefer_solid_edge", True)
+        cfg.setdefault("hysteresis_enabled", True)
 
-        # reload to pick up new golden immediately
+        cfg = self._cfg_with_current_tuning(cfg)
+
+        expected_center, expected_angle, err = self._detect_expected_from_frame(self._last_frame_bgr, cfg)
+
+        if err is not None:
+            self.lbl_cfg_status.setText(f"Status: CAPTURE FAIL: {err}")
+            return
+
+        cfg["expected_center"] = [float(expected_center[0]), float(expected_center[1])]
+        cfg["expected_angle"] = float(expected_angle)
+
+        golden_path = product_dir / "golden.png"
+        ok = cv2.imwrite(str(golden_path), self._last_frame_bgr)
+
+        if not ok:
+            self.lbl_cfg_status.setText("Status: GOLDEN SAVE FAIL")
+            return
+
         try:
-            if getattr(recipe, "config_name", "") and recipe.config_name != "legacy":
-                reloaded = self.recipe_manager.load(recipe.name, config_name=recipe.config_name)
-            else:
-                reloaded = self.recipe_manager.load(recipe.name)
-            self.engine.set_recipe(reloaded)
-        except Exception:
-            pass
+            _safe_write_json(str(product_dir / "golden_config.json"), cfg)
 
-        self.lbl_cfg_status.setText("Status: GOLDEN CAPTURED")
+            reloaded = self.recipe_manager.load(recipe.name)
+            self.engine.set_recipe(reloaded)
+            self._load_tuning_from_cfg()
+            self._update_expected_label()
+
+            self.lbl_cfg_status.setText(
+                f"Status: GOLDEN + EXPECTED SAVED  "
+                f"cx={expected_center[0]:.1f} cy={expected_center[1]:.1f} a={expected_angle:.1f}"
+            )
+
+        except Exception as e:
+            self.lbl_cfg_status.setText(f"Status: SAVED IMAGE, JSON FAIL: {e}")
 
     # -------------------------
     # Tuning save/load
     # -------------------------
-    def _load_tuning_from_cfg(self):
-        if self.engine.recipe is None:
-            return
-        cfg = self.engine.recipe.cfg
-
-        self.sp_canny_low.setValue(int(cfg.get("canny_low", 50)))
-        self.sp_canny_high.setValue(int(cfg.get("canny_high", 120)))
-        self.sp_blur.setValue(int(cfg.get("blur_ksize", 5)))
-        self.sp_clahe.setValue(float(cfg.get("clahe_clip", 1.5)))
-        self.sp_dilate.setValue(int(cfg.get("dilate_iter", 1)))
-        self.sp_close.setValue(int(cfg.get("close_iter", 1)))
-        self.sp_contrast.setValue(float(cfg.get("contrast_min", 6.0)))
-
-    def save_config_json(self):
-        if self.engine.recipe is None:
-            self.lbl_save.setText("Saved: NO RECIPE")
-            return
-
-        recipe = self.engine.recipe
-        cfg = dict(recipe.cfg)
+    def _cfg_with_current_tuning(self, cfg: dict) -> dict:
+        cfg = dict(cfg)
 
         cfg["canny_low"] = int(self.sp_canny_low.value())
         cfg["canny_high"] = int(self.sp_canny_high.value())
@@ -571,14 +743,68 @@ class CalibrationPage(QWidget):
         cfg["close_iter"] = int(self.sp_close.value())
         cfg["contrast_min"] = float(self.sp_contrast.value())
 
-        if cfg.get("golden_image_path") in (None, "", "golden.png", "golden.jpg", "golden.jpeg"):
-            cfg["golden_image_path"] = cfg.get("golden_image_path") or "golden.png"
+        cfg["golden_image_path"] = "golden.png"
+        cfg.setdefault("prefer_solid_edge", True)
+        cfg.setdefault("hysteresis_enabled", True)
+
+        return cfg
+
+    def _load_tuning_from_cfg(self):
+        if self.engine.recipe is None:
+            return
+
+        cfg = self.engine.recipe.cfg
+
+        self.sp_canny_low.setValue(int(cfg.get("canny_low", 50)))
+        self.sp_canny_high.setValue(int(cfg.get("canny_high", 120)))
+        self.sp_blur.setValue(int(cfg.get("blur_ksize", 5)))
+        self.sp_clahe.setValue(float(cfg.get("clahe_clip", 1.5)))
+        self.sp_dilate.setValue(int(cfg.get("dilate_iter", 1)))
+        self.sp_close.setValue(int(cfg.get("close_iter", 1)))
+        self.sp_contrast.setValue(float(cfg.get("contrast_min", 6.0)))
+
+        self._update_expected_label()
+
+    def _update_expected_label(self):
+        if self.engine.recipe is None:
+            self.lbl_expected.setText("Expected: —")
+            return
+
+        cfg = self.engine.recipe.cfg
+        c = cfg.get("expected_center")
+        a = cfg.get("expected_angle")
+
+        if c is None or a is None:
+            self.lbl_expected.setText("Expected: not set")
+            return
 
         try:
-            _safe_write_json(str(Path(recipe.config_path)), cfg)
-            self.lbl_save.setText(f"Saved: {Path(recipe.config_path).name}")
+            self.lbl_expected.setText(
+                f"Expected: cx={float(c[0]):.1f}, cy={float(c[1]):.1f}, angle={float(a):.1f}"
+            )
+        except Exception:
+            self.lbl_expected.setText("Expected: invalid")
+
+    def save_product_json(self):
+        if self.engine.recipe is None:
+            self.lbl_save.setText("Saved: NO PRODUCT")
+            return
+
+        recipe = self.engine.recipe
+        cfg = self._cfg_with_current_tuning(recipe.cfg)
+
+        product_dir = Path(recipe.recipe_dir)
+        product_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            _safe_write_json(str(product_dir / "golden_config.json"), cfg)
+
             recipe.cfg.clear()
             recipe.cfg.update(cfg)
+
+            self._update_expected_label()
+            self.lbl_save.setText("Saved: golden_config.json")
+
         except Exception as e:
             self.lbl_save.setText(f"Saved: FAIL ({e})")
 

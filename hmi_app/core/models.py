@@ -13,9 +13,9 @@ class Recipe:
     Legacy layout:
       recipes/<recipe>/golden_config.json (and cfg contains golden_image_path)
 
-    New layout (folder-per-config):
+    New layout:
       recipes/<recipe>/
-        active_config.txt  (optional; contains config name)
+        active_config.txt
         configs/<config_name>/
           golden_config.json
           golden.(png|jpg|jpeg)
@@ -43,9 +43,16 @@ class EngineSettings:
     stab_every_n: int = 6
     search_padding_px: int = 120
 
-    # Overlay toggles
+    # Master overlay toggles
     show_stab: bool = True
     show_baseplate: bool = True
+
+    # Stabilizer debug layer toggles
+    show_stab_search_roi: bool = True
+    show_stab_feature_points: bool = True
+    show_stab_anchors: bool = True
+    show_stab_legacy: bool = False
+    show_stab_text: bool = True
 
     # PASS stability gate
     stable_need: int = 5
@@ -60,7 +67,7 @@ class EngineSettings:
 
 @dataclass
 class QCFrameOutput:
-    # Always available (Auto page uses this today)
+    # Always available
     overlay_bgr: np.ndarray
 
     # Optional, for RAW/PROC/OVERLAY switching
@@ -76,5 +83,5 @@ class QCFrameOutput:
     center_rel: Optional[Tuple[float, float]] = None
     angle: Optional[float] = None
 
-    # Extra debug (optional)
+    # Extra debug
     detector_dbg: Optional[Dict[str, Any]] = None
