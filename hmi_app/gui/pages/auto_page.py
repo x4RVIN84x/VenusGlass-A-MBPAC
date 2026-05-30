@@ -130,7 +130,7 @@ class AutoPage(QWidget):
 
         # Display zoom
         self.chk_zoom = QCheckBox("Enable display zoom around baseplate")
-        self.chk_zoom.setChecked(False)
+        self.chk_zoom.setChecked(True)
         vb.addWidget(self.chk_zoom)
 
         self.lbl_zoom = QLabel("Display zoom: 1.00x")
@@ -173,6 +173,9 @@ class AutoPage(QWidget):
 
         self.btn_start.clicked.connect(self.start)
         self.btn_stop.clicked.connect(self.stop)
+
+        self._last_zoom_crop = None
+        self._update_zoom_label()
 
     def _set_status(self, text: str):
         fm = QFontMetrics(self.lbl_status.font())
@@ -329,6 +332,8 @@ class AutoPage(QWidget):
         if img is None:
             return img
 
+        self._last_zoom_crop = None
+
         if not self.chk_zoom.isChecked():
             return img
 
@@ -348,6 +353,8 @@ class AutoPage(QWidget):
 
         x0 = max(0, min(x0, W - crop_w))
         y0 = max(0, min(y0, H - crop_h))
+
+        self._last_zoom_crop = (int(x0), int(y0), int(crop_w), int(crop_h), int(W), int(H))
 
         crop = img[y0:y0 + crop_h, x0:x0 + crop_w].copy()
 
@@ -471,6 +478,212 @@ class AutoPage(QWidget):
 
         return vis
 
+    def _operator_lines_from_stab(self, stab: dict):
+        if not isinstance(stab, dict):
+            return []
+
+        corr = stab.get("baseplate_correction_vector")
+
+        if not isinstance(corr, dict):
+            offset = stab.get("current_offset_display")
+            if isinstance(offset, dict):
+                try:
+                    corr = {
+                        "unit": str(offset.get("unit", "px")),
+                        "screen_dx": -float(offset.get("dx", 0.0)),
+                        "screen_dy": -float(offset.get("dy", 0.0)),
+                    }
+                except Exception:
+                    corr = None
+
+        if not isinstance(corr, dict):
+            measure = stab.get("current_notch_measure_mm")
+            if isinstance(measure, dict):
+                try:
+                    corr = {
+                        "unit": "mm",
+                        "screen_dx": -float(measure.get("dx", 0.0)),
+                        "screen_dy": -float(measure.get("dy", 0.0)),
+                    }
+                except Exception:
+                    corr = None
+
+        if not isinstance(corr, dict):
+            return []
+
+        try:
+            unit = str(corr.get("unit", "px"))
+            dx = float(corr.get("screen_dx", 0.0))
+            dy = float(corr.get("screen_dy", 0.0))
+        except Exception:
+            return []
+
+        lines = []
+
+        if abs(dx) >= 0.01:
+            lines.append(f"{abs(dx):.2f}{unit} {'RIGHT' if dx > 0 else 'LEFT'}")
+
+        if abs(dy) >= 0.01:
+            lines.append(f"{abs(dy):.2f}{unit} {'DOWN' if dy > 0 else 'UP'}")
+
+        if not lines:
+            return ["CENTERED"]
+
+        if len(lines) == 1:
+            return [f"MOVE {lines[0]}"]
+
+        return [f"MOVE {lines[0]}", f"AND {lines[1]}"]
+
+    def _map_abs_pt_to_display(self, pt, W: int, H: int):
+        try:
+            x = float(pt[0])
+            y = float(pt[1])
+        except Exception:
+            return None
+
+        if not np.isfinite(x) or not np.isfinite(y):
+            return None
+
+        zinfo = getattr(self, "_last_zoom_crop", None)
+
+        if zinfo is None:
+            return int(round(x)), int(round(y))
+
+        try:
+            x0, y0, crop_w, crop_h, out_w, out_h = zinfo
+            dx = (x - float(x0)) * float(out_w) / max(1.0, float(crop_w))
+            dy = (y - float(y0)) * float(out_h) / max(1.0, float(crop_h))
+        except Exception:
+            return int(round(x)), int(round(y))
+
+        return int(round(dx)), int(round(dy))
+
+    def _expected_pt_from_stab_for_display(self, stab: dict):
+        if not isinstance(stab, dict):
+            return None
+
+        exp = stab.get("expected_baseplate_center_abs")
+        try:
+            arr = np.asarray(exp, dtype=np.float64).reshape(-1)
+            if arr.size >= 2 and np.isfinite(arr[0]) and np.isfinite(arr[1]):
+                return float(arr[0]), float(arr[1])
+        except Exception:
+            pass
+
+        cur = stab.get("current_baseplate_center_abs")
+        try:
+            cur = np.asarray(cur, dtype=np.float64).reshape(-1)
+            if cur.size < 2 or not np.isfinite(cur[0]) or not np.isfinite(cur[1]):
+                return None
+        except Exception:
+            return None
+
+        corr = stab.get("baseplate_correction_vector")
+        if isinstance(corr, dict):
+            try:
+                if "screen_dx_px" in corr and "screen_dy_px" in corr:
+                    return (
+                        float(cur[0]) + float(corr.get("screen_dx_px", 0.0)),
+                        float(cur[1]) + float(corr.get("screen_dy_px", 0.0)),
+                    )
+
+                dx = float(corr.get("screen_dx", 0.0))
+                dy = float(corr.get("screen_dy", 0.0))
+                unit = str(corr.get("unit", "px")).lower()
+                px_per_mm = corr.get("px_per_mm", None)
+
+                if unit == "mm" and px_per_mm is not None:
+                    dx *= float(px_per_mm)
+                    dy *= float(px_per_mm)
+
+                return float(cur[0]) + dx, float(cur[1]) + dy
+            except Exception:
+                pass
+
+        return None
+
+    def _draw_operator_guidance_hud(self, img, out):
+        """
+        Draw target cross + bottom-right movement badge AFTER display zoom.
+
+        This guarantees the operator guidance remains visible even when the
+        zoomed view crops the original overlay HUD.
+        """
+        if img is None or out is None:
+            return img
+
+        stab = getattr(out, "stab_info", None)
+        if not isinstance(stab, dict):
+            return img
+
+        vis = img.copy()
+        H, W = vis.shape[:2]
+
+        cur = stab.get("current_baseplate_center_abs")
+        exp = self._expected_pt_from_stab_for_display(stab)
+
+        cur_d = self._map_abs_pt_to_display(cur, W, H) if cur is not None else None
+        exp_d = self._map_abs_pt_to_display(exp, W, H) if exp is not None else None
+
+        if exp_d is not None and (-80 <= exp_d[0] <= W + 80) and (-80 <= exp_d[1] <= H + 80):
+            ex = max(0, min(W - 1, exp_d[0]))
+            ey = max(0, min(H - 1, exp_d[1]))
+
+            cv2.circle(vis, (ex, ey), 22, (255, 0, 255), 3, lineType=cv2.LINE_AA)
+            cv2.circle(vis, (ex, ey), 13, (255, 255, 0), 2, lineType=cv2.LINE_AA)
+            cv2.drawMarker(
+                vis,
+                (ex, ey),
+                (255, 0, 255),
+                markerType=cv2.MARKER_CROSS,
+                markerSize=44,
+                thickness=3,
+                line_type=cv2.LINE_AA,
+            )
+
+            cv2.putText(vis, "TARGET", (ex + 16, ey - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(vis, "TARGET", (ex + 16, ey - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 0, 255), 1, cv2.LINE_AA)
+
+        if cur_d is not None and exp_d is not None:
+            cx = max(0, min(W - 1, cur_d[0]))
+            cy = max(0, min(H - 1, cur_d[1]))
+            ex = max(0, min(W - 1, exp_d[0]))
+            ey = max(0, min(H - 1, exp_d[1]))
+
+            cv2.arrowedLine(vis, (cx, cy), (ex, ey), (255, 0, 255), 4, cv2.LINE_AA, tipLength=0.25)
+            cv2.circle(vis, (cx, cy), 15, (0, 0, 255), 2, lineType=cv2.LINE_AA)
+
+        lines = self._operator_lines_from_stab(stab)
+        if lines:
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            scale = 0.58
+            thick = 2
+            sizes = [cv2.getTextSize(str(t), font, scale, thick)[0] for t in lines]
+            text_w = max((s[0] for s in sizes), default=180)
+            box_w = int(min(max(text_w + 48, 260), max(260, W - 48)))
+            box_h = 58 if len(lines) == 1 else 82
+
+            x0 = max(18, W - box_w - 24)
+            y0 = max(130, H - box_h - 48)
+            x1 = min(W - 18, x0 + box_w)
+            y1 = min(H - 18, y0 + box_h)
+
+            cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 0, 0), -1, lineType=cv2.LINE_AA)
+            cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 0, 255), 2, lineType=cv2.LINE_AA)
+            cv2.rectangle(vis, (x0, y0), (x0 + 8, y1), (255, 0, 255), -1, lineType=cv2.LINE_AA)
+
+            start_y = int(round((y0 + y1) * 0.5 - (len(lines) - 1) * 13 + 8))
+            for i, line in enumerate(lines):
+                (tw, _th), _base = cv2.getTextSize(str(line), font, scale, thick)
+                tx = int(round((x0 + x1) * 0.5 - tw * 0.5))
+                ty = int(round(start_y + i * 26))
+
+                cv2.putText(vis, str(line), (tx, ty), font, scale, (0, 0, 0), thick + 4, cv2.LINE_AA)
+                cv2.putText(vis, str(line), (tx, ty), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+        return vis
+
+
     def start(self):
         if self._running:
             return
@@ -524,6 +737,9 @@ class AutoPage(QWidget):
 
         # Zoom first so the alarm HUD stays full-screen on top of the zoomed feed.
         display = self._zoom_display_image(display, out)
+
+        # Draw operator guidance AFTER zoom so it never gets cropped away.
+        display = self._draw_operator_guidance_hud(display, out)
 
         alarm_on, alarm_elapsed = self._update_track_alarm(out)
         if alarm_on:

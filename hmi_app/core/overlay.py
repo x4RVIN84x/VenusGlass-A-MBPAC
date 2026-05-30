@@ -41,9 +41,18 @@ def _safe_cv_pt(pt):
     return int(round(x)), int(round(y))
 
 
-def _direction_text_from_correction(corr: dict) -> str:
+def _direction_lines_from_correction(corr: dict):
+    """
+    Returns operator movement text as one/two short lines.
+
+    Preferred source:
+      baseplate_correction_vector["screen_dx/screen_dy"]
+
+    Fallback source:
+      current offset/error dictionaries, inverted as a correction.
+    """
     if not isinstance(corr, dict):
-        return ""
+        return []
 
     unit = str(corr.get("unit", "px"))
 
@@ -51,28 +60,31 @@ def _direction_text_from_correction(corr: dict) -> str:
         dx = float(corr.get("screen_dx", 0.0))
         dy = float(corr.get("screen_dy", 0.0))
     except Exception:
-        return ""
+        return []
 
-    h = ""
-    v = ""
+    lines = []
 
     if abs(dx) >= 0.01:
-        h = f"{abs(dx):.2f}{unit} {'RIGHT' if dx > 0 else 'LEFT'}"
+        lines.append(f"{abs(dx):.2f}{unit} {'RIGHT' if dx > 0 else 'LEFT'}")
 
     if abs(dy) >= 0.01:
         # Camera/image coordinates: positive y is down on screen.
-        v = f"{abs(dy):.2f}{unit} {'DOWN' if dy > 0 else 'UP'}"
+        lines.append(f"{abs(dy):.2f}{unit} {'DOWN' if dy > 0 else 'UP'}")
 
-    if h and v:
-        return f"NEEDED: {h}, {v}"
+    if not lines:
+        return ["CENTERED"]
 
-    if h:
-        return f"NEEDED: {h}"
+    if len(lines) == 1:
+        return [f"MOVE {lines[0]}"]
 
-    if v:
-        return f"NEEDED: {v}"
+    return [f"MOVE {lines[0]}", f"AND {lines[1]}"]
 
-    return "CENTERED"
+
+def _direction_text_from_correction(corr: dict) -> str:
+    lines = _direction_lines_from_correction(corr)
+    if not lines:
+        return ""
+    return " / ".join(lines)
 
 
 def _as_dict(v) -> dict:
@@ -269,6 +281,167 @@ def _draw_readable_box_text(vis, text: str, org, *, color=(255, 255, 255), borde
     _put_text(vis, text, (x, y), scale=scale, color=color, thickness=thickness)
 
 
+
+def _draw_movement_badge_bottom_right(vis, corr: dict):
+    """
+    HUD-style movement instruction.
+    Always sits bottom-right, away from the baseplate/expected-center marker.
+    """
+    if vis is None or not isinstance(corr, dict):
+        return
+
+    lines = _direction_lines_from_correction(corr)
+    if not lines:
+        return
+
+    H, W = vis.shape[:2]
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.58
+    thick = 2
+    pad_x = 18
+    pad_y = 14
+
+    sizes = [cv2.getTextSize(str(t), font, scale, thick)[0] for t in lines]
+    text_w = max((s[0] for s in sizes), default=180)
+    text_h = sum((s[1] for s in sizes)) + (len(lines) - 1) * 12
+
+    box_w = int(min(max(text_w + 2 * pad_x + 12, 260), max(260, W - 48)))
+    box_h = int(max(58, text_h + 2 * pad_y + 8))
+
+    # Bottom-right, lifted above the footer text.
+    margin_r = 24
+    margin_b = 48
+
+    x0 = max(18, W - box_w - margin_r)
+    y0 = max(130, H - box_h - margin_b)
+    x1 = min(W - 18, x0 + box_w)
+    y1 = min(H - 18, y0 + box_h)
+
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 0, 0), -1, lineType=cv2.LINE_AA)
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 0, 255), 2, lineType=cv2.LINE_AA)
+
+    # Magenta side strip so operator notices it without making it huge.
+    cv2.rectangle(vis, (x0, y0), (x0 + 8, y1), (255, 0, 255), -1, lineType=cv2.LINE_AA)
+
+    total_line_h = 26
+    start_y = int(round((y0 + y1) * 0.5 - (len(lines) - 1) * total_line_h * 0.5 + 8))
+
+    for i, line in enumerate(lines):
+        (tw, th), _base = cv2.getTextSize(str(line), font, scale, thick)
+        tx = int(round((x0 + x1) * 0.5 - tw * 0.5))
+        ty = int(round(start_y + i * total_line_h))
+
+        cv2.putText(vis, str(line), (tx, ty), font, scale, (0, 0, 0), thick + 4, cv2.LINE_AA)
+        cv2.putText(vis, str(line), (tx, ty), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+
+
+def _fallback_correction_from_stab(stab_info: dict):
+    """
+    Some recovered engine builds do not populate baseplate_correction_vector in
+    fallback ROI mode. Build a usable operator correction from the signed offset.
+    """
+    if not isinstance(stab_info, dict):
+        return None
+
+    corr = stab_info.get("baseplate_correction_vector")
+    if isinstance(corr, dict):
+        return corr
+
+    offset = stab_info.get("current_offset_display")
+    if isinstance(offset, dict):
+        try:
+            unit = str(offset.get("unit", "px"))
+            # current_offset_display is current - expected in the measurement frame,
+            # so correction direction is the opposite.
+            dx = -float(offset.get("dx", 0.0))
+            dy = -float(offset.get("dy", 0.0))
+            return {
+                "unit": unit,
+                "screen_dx": dx,
+                "screen_dy": dy,
+                "source": "fallback_from_current_offset_display",
+            }
+        except Exception:
+            pass
+
+    measure = stab_info.get("current_notch_measure_mm")
+    if isinstance(measure, dict):
+        try:
+            dx = -float(measure.get("dx", 0.0))
+            dy = -float(measure.get("dy", 0.0))
+            return {
+                "unit": "mm",
+                "screen_dx": dx,
+                "screen_dy": dy,
+                "source": "fallback_from_current_notch_measure_mm",
+            }
+        except Exception:
+            pass
+
+    measure = stab_info.get("current_notch_measure")
+    if isinstance(measure, dict):
+        try:
+            dx = -float(measure.get("dx", 0.0))
+            dy = -float(measure.get("dy", 0.0))
+            return {
+                "unit": "px",
+                "screen_dx": dx,
+                "screen_dy": dy,
+                "source": "fallback_from_current_notch_measure",
+            }
+        except Exception:
+            pass
+
+    return None
+
+
+def _expected_point_from_current_and_correction(stab_info: dict):
+    """
+    Reconstruct expected center if engine did not explicitly expose it.
+    This restores the magenta target/cross on recovered mixed modules.
+    """
+    if not isinstance(stab_info, dict):
+        return None
+
+    expected_pt = _safe_cv_pt(stab_info.get("expected_baseplate_center_abs"))
+    if expected_pt is not None:
+        return expected_pt
+
+    current_pt = _safe_cv_pt(stab_info.get("current_baseplate_center_abs"))
+    if current_pt is None:
+        return None
+
+    corr = stab_info.get("baseplate_correction_vector")
+    if isinstance(corr, dict):
+        try:
+            if "screen_dx_px" in corr and "screen_dy_px" in corr:
+                return (
+                    int(round(current_pt[0] + float(corr.get("screen_dx_px", 0.0)))),
+                    int(round(current_pt[1] + float(corr.get("screen_dy_px", 0.0)))),
+                )
+
+            px_per_mm = corr.get("px_per_mm", None)
+            unit = str(corr.get("unit", "px")).lower()
+            sx = float(corr.get("screen_dx", 0.0))
+            sy = float(corr.get("screen_dy", 0.0))
+
+            if unit == "mm" and px_per_mm is not None:
+                scale = float(px_per_mm)
+                sx *= scale
+                sy *= scale
+
+            return (
+                int(round(current_pt[0] + sx)),
+                int(round(current_pt[1] + sy)),
+            )
+        except Exception:
+            pass
+
+    return None
+
+
+
 def _extract_lines_and_anchors(stab_info: dict):
     nf = stab_info.get("notch_frame")
     if not isinstance(nf, dict):
@@ -345,14 +518,18 @@ def _draw_expected_center_guidance(vis, stab_info: dict):
     Draws:
       - expected/correct baseplate center target
       - current-to-expected correction arrow
-      - readable direction text for operator
+      - bottom-right movement badge for the operator
     """
     if vis is None or not isinstance(stab_info, dict):
         return
 
-    expected_pt = _safe_cv_pt(stab_info.get("expected_baseplate_center_abs"))
+    expected_pt = _expected_point_from_current_and_correction(stab_info)
     current_pt = _safe_cv_pt(stab_info.get("current_baseplate_center_abs"))
-    corr = stab_info.get("baseplate_correction_vector")
+    corr = _fallback_correction_from_stab(stab_info)
+
+    # Always try to draw the movement badge if we can derive the correction.
+    if corr is not None:
+        _draw_movement_badge_bottom_right(vis, corr)
 
     if expected_pt is None:
         return
@@ -360,24 +537,24 @@ def _draw_expected_center_guidance(vis, stab_info: dict):
     ex, ey = expected_pt
 
     # Expected/correct center marker: magenta/cyan bullseye.
-    cv2.circle(vis, (ex, ey), 20, (255, 0, 255), 2, lineType=cv2.LINE_AA)
-    cv2.circle(vis, (ex, ey), 12, (255, 255, 0), 2, lineType=cv2.LINE_AA)
+    cv2.circle(vis, (ex, ey), 22, (255, 0, 255), 3, lineType=cv2.LINE_AA)
+    cv2.circle(vis, (ex, ey), 13, (255, 255, 0), 2, lineType=cv2.LINE_AA)
 
     cv2.drawMarker(
         vis,
         (ex, ey),
         (255, 0, 255),
         markerType=cv2.MARKER_CROSS,
-        markerSize=38,
-        thickness=2,
+        markerSize=44,
+        thickness=3,
         line_type=cv2.LINE_AA,
     )
 
     _put_text(
         vis,
-        "EXPECTED CENTER",
-        (ex + 16, ey - 20),
-        scale=0.52,
+        "TARGET",
+        (ex + 16, ey - 18),
+        scale=0.50,
         color=(255, 0, 255),
         thickness=1,
     )
@@ -393,32 +570,13 @@ def _draw_expected_center_guidance(vis, stab_info: dict):
         (cx, cy),
         (ex, ey),
         (255, 0, 255),
-        3,
+        4,
         line_type=cv2.LINE_AA,
-        tipLength=0.22,
+        tipLength=0.25,
     )
 
     # Small current ring so operator sees start of correction vector.
     cv2.circle(vis, (cx, cy), 15, (0, 0, 255), 2, lineType=cv2.LINE_AA)
-
-    txt = _direction_text_from_correction(corr)
-    if not txt:
-        return
-
-    mx = int(round((cx + ex) * 0.5))
-    my = int(round((cy + ey) * 0.5))
-
-    # Keep the label on-screen.
-    mx = max(20, min(mx, vis.shape[1] - 480))
-    my = max(65, min(my, vis.shape[0] - 20))
-
-    _draw_readable_box_text(
-        vis,
-        txt,
-        (mx, my - 10),
-        color=(255, 255, 255),
-        border=(255, 0, 255),
-    )
 
 
 # ----------------------------
