@@ -7,10 +7,10 @@
         244
     ],
     "expected_center": [
-        146.5,
-        118.0
+        90.00984191894531,
+        111.38436889648438
     ],
-    "expected_angle": 0.0,
+    "expected_angle": -1.47,
     "tolerance_px": {
         "x": 10,
         "y": 10,

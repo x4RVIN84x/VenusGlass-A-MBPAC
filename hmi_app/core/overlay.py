@@ -7,8 +7,74 @@ import numpy as np
 
 
 # ----------------------------
-# Small drawing helpers
+# Helpers
 # ----------------------------
+def _safe_cv_pt(pt):
+    """
+    Convert point-like values into a safe OpenCV integer point.
+
+    Handles:
+      [x, y]
+      (x, y)
+      np.array([x, y])
+      nested-ish arrays
+
+    Returns None if invalid.
+    """
+    if pt is None:
+        return None
+
+    try:
+        arr = np.asarray(pt, dtype=np.float64).reshape(-1)
+    except Exception:
+        return None
+
+    if arr.size < 2:
+        return None
+
+    x = float(arr[0])
+    y = float(arr[1])
+
+    if not np.isfinite(x) or not np.isfinite(y):
+        return None
+
+    return int(round(x)), int(round(y))
+
+
+def _direction_text_from_correction(corr: dict) -> str:
+    if not isinstance(corr, dict):
+        return ""
+
+    unit = str(corr.get("unit", "px"))
+
+    try:
+        dx = float(corr.get("screen_dx", 0.0))
+        dy = float(corr.get("screen_dy", 0.0))
+    except Exception:
+        return ""
+
+    h = ""
+    v = ""
+
+    if abs(dx) >= 0.01:
+        h = f"{abs(dx):.2f}{unit} {'RIGHT' if dx > 0 else 'LEFT'}"
+
+    if abs(dy) >= 0.01:
+        # Camera/image coordinates: positive y is down on screen.
+        v = f"{abs(dy):.2f}{unit} {'DOWN' if dy > 0 else 'UP'}"
+
+    if h and v:
+        return f"MOVE {h} / {v}"
+
+    if h:
+        return f"MOVE {h}"
+
+    if v:
+        return f"MOVE {v}"
+
+    return "CENTERED"
+
+
 def _as_dict(v) -> dict:
     return v if isinstance(v, dict) else {}
 
@@ -19,20 +85,44 @@ def _setting(settings, name: str, default):
     return getattr(settings, name, default)
 
 
+def _setting_any(settings, names, default):
+    if settings is None:
+        return default
+
+    for name in names:
+        if hasattr(settings, name):
+            return getattr(settings, name)
+
+    return default
+
+
 def _is_good_pt(pt) -> bool:
-    try:
-        return (
-            pt is not None
-            and len(pt) >= 2
-            and np.isfinite(float(pt[0]))
-            and np.isfinite(float(pt[1]))
-        )
-    except Exception:
-        return False
+    return _safe_cv_pt(pt) is not None
 
 
 def _ipt(pt) -> Tuple[int, int]:
-    return (int(round(float(pt[0]))), int(round(float(pt[1]))))
+    p = _safe_cv_pt(pt)
+    if p is None:
+        return 0, 0
+    return p
+
+
+def _as_line(line):
+    if line is None:
+        return None
+
+    try:
+        vals = tuple(map(float, line))
+    except Exception:
+        return None
+
+    if len(vals) != 4:
+        return None
+
+    if not all(np.isfinite(vals)):
+        return None
+
+    return vals
 
 
 def _as_points(pts) -> Optional[np.ndarray]:
@@ -137,20 +227,13 @@ def _draw_polyline(vis, cnt, color=(0, 255, 0), thickness=1, closed=True):
         pass
 
 
-def _draw_fitline_clipped(vis, line, color=(160, 80, 160), thickness=1):
-    """
-    Debug only. Clipped finite line instead of huge infinite X.
-    """
+def _draw_fitline_clipped(vis, line, color=(0, 255, 0), thickness=2):
+    line = _as_line(line)
+
     if line is None:
         return
 
-    try:
-        vx, vy, x0, y0 = map(float, line)
-    except Exception:
-        return
-
-    if not all(np.isfinite([vx, vy, x0, y0])):
-        return
+    vx, vy, x0, y0 = line
 
     H, W = vis.shape[:2]
 
@@ -163,42 +246,257 @@ def _draw_fitline_clipped(vis, line, color=(160, 80, 160), thickness=1):
         cv2.line(vis, cp1, cp2, color, int(thickness), lineType=cv2.LINE_AA)
 
 
-# ----------------------------
-# Stabilizer debug overlay
-# ----------------------------
-def draw_stab_debug(vis, stab_info: dict, *, settings=None):
-    """
-    Layered stabilizer overlay.
+def _extract_lines_and_anchors(stab_info: dict):
+    nf = stab_info.get("notch_frame")
+    if not isinstance(nf, dict):
+        nf = stab_info.get("current_notch_frame")
+    if not isinstance(nf, dict):
+        nf = _as_dict(stab_info.get("notch_frame_runtime"))
 
-    Layers are controlled through EngineSettings:
-      show_stab_search_roi
-      show_stab_feature_points
-      show_stab_anchors
-      show_stab_legacy
-      show_stab_text
+    lines = {}
+    anchors = {}
+
+    for source in (
+        nf.get("lines") if isinstance(nf, dict) else None,
+        nf.get("fitted_lines") if isinstance(nf, dict) else None,
+        stab_info.get("notch_lines"),
+        stab_info.get("current_lines"),
+        stab_info.get("lines"),
+    ):
+        if isinstance(source, dict):
+            lines.update(source)
+
+    for source in (
+        nf.get("anchors") if isinstance(nf, dict) else None,
+        nf.get("points") if isinstance(nf, dict) else None,
+        stab_info.get("notch_anchors"),
+        stab_info.get("anchors_current"),
+        stab_info.get("anchors"),
+    ):
+        if isinstance(source, dict):
+            anchors.update(source)
+
+    for k in ("bottom_left", "bottom_right", "bottom_mid"):
+        if k in stab_info:
+            anchors[k] = stab_info[k]
+        if isinstance(nf, dict) and k in nf:
+            anchors[k] = nf[k]
+
+    for k in ("left_line", "right_line", "bottom_line", "bottom_ref_line"):
+        if k in stab_info:
+            lines[k] = stab_info[k]
+        if isinstance(nf, dict) and k in nf:
+            lines[k] = nf[k]
+
+    left = (
+        _as_line(lines.get("left"))
+        or _as_line(lines.get("left_wall"))
+        or _as_line(lines.get("left_line"))
+    )
+
+    right = (
+        _as_line(lines.get("right"))
+        or _as_line(lines.get("right_wall"))
+        or _as_line(lines.get("right_line"))
+    )
+
+    bottom = (
+        _as_line(lines.get("bottom"))
+        or _as_line(lines.get("bottom_ref"))
+        or _as_line(lines.get("bottom_line"))
+        or _as_line(lines.get("bottom_ref_line"))
+    )
+
+    return {
+        "left_line": left,
+        "right_line": right,
+        "bottom_line": bottom,
+        "bottom_left": anchors.get("bottom_left"),
+        "bottom_right": anchors.get("bottom_right"),
+        "bottom_mid": anchors.get("bottom_mid"),
+    }
+
+
+def _draw_compact_operator_box(vis, line1: str, line2: str = ""):
+    H, W = vis.shape[:2]
+
+    box_w = min(330, W - 70)
+    box_h = 74 if line2 else 54
+
+    margin_right = 34
+    margin_bottom = 42
+
+    x1 = W - margin_right
+    y1 = H - margin_bottom
+    x0 = x1 - box_w
+    y0 = y1 - box_h
+
+    x0 = max(20, x0)
+    y0 = max(130, y0)
+    x1 = min(W - 20, x1)
+    y1 = min(H - 20, y1)
+
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 0, 0), -1, lineType=cv2.LINE_AA)
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 0, 255), 2, lineType=cv2.LINE_AA)
+    cv2.rectangle(vis, (x0, y0), (x0 + 8, y1), (255, 0, 255), -1)
+
+    def put_centered(text, y, scale, color, thickness):
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, _th), _base = cv2.getTextSize(str(text), font, scale, thickness)
+        tx = int(round((x0 + x1) * 0.5 - tw * 0.5))
+
+        cv2.putText(
+            vis,
+            str(text),
+            (tx, y),
+            font,
+            scale,
+            (0, 0, 0),
+            thickness + 3,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            vis,
+            str(text),
+            (tx, y),
+            font,
+            scale,
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+    if line2:
+        put_centered(line1, y0 + 30, 0.52, (255, 255, 255), 2)
+        put_centered(line2, y0 + 58, 0.52, (255, 255, 255), 2)
+    else:
+        put_centered(line1, y0 + 36, 0.55, (255, 255, 255), 2)
+
+
+def _draw_expected_center_guidance(vis, stab_info: dict):
+    """
+    Draws:
+      - expected/correct baseplate center target
+      - current-to-expected correction arrow
+      - compact bottom-right operator instruction box
     """
     if vis is None or not isinstance(stab_info, dict):
         return
 
-    ok = bool(stab_info.get("ok", False))
-    method = str(stab_info.get("current_anchor_method", "unknown"))
+    expected_pt = _safe_cv_pt(stab_info.get("expected_baseplate_center_abs"))
+    current_pt = _safe_cv_pt(stab_info.get("current_baseplate_center_abs"))
+    corr = stab_info.get("baseplate_correction_vector")
 
-    show_search = bool(_setting(settings, "show_stab_search_roi", True))
-    show_points = bool(_setting(settings, "show_stab_feature_points", True))
-    show_anchors = bool(_setting(settings, "show_stab_anchors", True))
-    show_legacy = bool(_setting(settings, "show_stab_legacy", False))
-    show_text = bool(_setting(settings, "show_stab_text", True))
+    if expected_pt is None:
+        return
+
+    ex, ey = expected_pt
+
+    # Expected/correct center marker.
+    cv2.circle(vis, (ex, ey), 22, (255, 0, 255), 3, lineType=cv2.LINE_AA)
+    cv2.circle(vis, (ex, ey), 13, (255, 255, 0), 2, lineType=cv2.LINE_AA)
+
+    cv2.drawMarker(
+        vis,
+        (ex, ey),
+        (255, 0, 255),
+        markerType=cv2.MARKER_CROSS,
+        markerSize=42,
+        thickness=3,
+        line_type=cv2.LINE_AA,
+    )
+
+    _put_text(
+        vis,
+        "TARGET",
+        (ex + 16, ey - 18),
+        scale=0.48,
+        color=(255, 0, 255),
+        thickness=1,
+    )
+
+    if current_pt is None:
+        return
+
+    cx, cy = current_pt
+
+    cv2.arrowedLine(
+        vis,
+        (cx, cy),
+        (ex, ey),
+        (255, 0, 255),
+        4,
+        line_type=cv2.LINE_AA,
+        tipLength=0.25,
+    )
+
+    cv2.circle(vis, (cx, cy), 16, (0, 0, 255), 2, lineType=cv2.LINE_AA)
+
+    if not isinstance(corr, dict):
+        return
+
+    unit = str(corr.get("unit", "px"))
+
+    try:
+        dx = float(corr.get("screen_dx", 0.0))
+        dy = float(corr.get("screen_dy", 0.0))
+    except Exception:
+        return
+
+    horizontal = ""
+    vertical = ""
+
+    if abs(dx) >= 0.01:
+        horizontal = f"{abs(dx):.2f}{unit} {'RIGHT' if dx > 0 else 'LEFT'}"
+
+    if abs(dy) >= 0.01:
+        vertical = f"{abs(dy):.2f}{unit} {'DOWN' if dy > 0 else 'UP'}"
+
+    if horizontal and vertical:
+        line1 = f"MOVE {horizontal}"
+        line2 = f"AND {vertical}"
+    elif horizontal:
+        line1 = f"MOVE {horizontal}"
+        line2 = ""
+    elif vertical:
+        line1 = f"MOVE {vertical}"
+        line2 = ""
+    else:
+        line1 = "CENTERED"
+        line2 = ""
+
+    _draw_compact_operator_box(vis, line1, line2)
+
+
+# ----------------------------
+# Stabilizer / notch debug
+# ----------------------------
+def draw_stab_debug(vis, stab_info: dict, *, settings=None):
+    if vis is None or not isinstance(stab_info, dict):
+        return
+
+    ok = bool(stab_info.get("ok", False))
+    method = str(stab_info.get("current_anchor_method", stab_info.get("anchor_method", "unknown")))
+
+    # Support both older and newer EngineSettings names.
+    show_search = bool(_setting_any(settings, ("show_search_roi", "show_stab_search_roi"), True))
+    show_contour = bool(_setting_any(settings, ("show_notch_contour", "show_stab_notch_contour"), True))
+    show_lines = bool(_setting_any(settings, ("show_fitted_lines", "show_stab_fitted_lines"), True))
+    show_anchors = bool(_setting_any(settings, ("show_new_anchors", "show_stab_anchors"), True))
+    show_points = bool(_setting_any(settings, ("show_raw_points", "show_stab_feature_points"), False))
+    show_legacy = bool(_setting_any(settings, ("show_legacy_debug", "show_stab_legacy"), False))
+    show_text = bool(_setting_any(settings, ("show_stabilizer_text", "show_stab_text"), True))
 
     solid_dbg = _as_dict(stab_info.get("solid_edge_debug"))
+    dark_dbg = _as_dict(stab_info.get("dark_region_debug"))
     legacy_dbg = _as_dict(stab_info.get("legacy_lines_debug"))
     current_dbg = _as_dict(stab_info.get("current_lines_debug"))
 
-    if method == "solid_edge" and solid_dbg:
+    active_dbg = current_dbg
+    if dark_dbg:
+        active_dbg = dark_dbg
+    elif solid_dbg:
         active_dbg = solid_dbg
-    elif method == "legacy_dot_band_lines" and legacy_dbg:
-        active_dbg = legacy_dbg
-    else:
-        active_dbg = current_dbg
 
     # ----------------------------
     # Search ROI
@@ -222,28 +520,81 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
             pass
 
     # ----------------------------
-    # Active feature points / contour source
+    # Actual notch contour edge
+    # ----------------------------
+    if show_contour:
+        _draw_polyline(vis, active_dbg.get("contour_abs"), color=(0, 220, 255), thickness=2, closed=False)
+        _draw_polyline(vis, active_dbg.get("lower_contour_abs"), color=(0, 220, 255), thickness=2, closed=False)
+        _draw_polyline(vis, active_dbg.get("hull_abs"), color=(0, 160, 255), thickness=1, closed=True)
+
+        pts_used = _as_dict(active_dbg.get("points_used_abs"))
+        _draw_points(vis, pts_used.get("contour"), color=(0, 220, 255), radius=1, step=12)
+        _draw_points(vis, pts_used.get("lower_contour"), color=(0, 220, 255), radius=1, step=8)
+
+    # ----------------------------
+    # Optional raw points
     # ----------------------------
     if show_points:
         pts_used = _as_dict(active_dbg.get("points_used_abs"))
 
-        if method == "solid_edge":
-            # Solid edge source:
-            # orange = top support
-            # cyan = sparse solid edge
-            # yellow/orange = bottom support
-            _draw_points(vis, pts_used.get("left_top"), color=(255, 180, 0), radius=1, step=8)
-            _draw_points(vis, pts_used.get("right_top"), color=(255, 180, 0), radius=1, step=8)
-            _draw_points(vis, pts_used.get("bottom"), color=(0, 180, 255), radius=1, step=10)
-            _draw_points(vis, pts_used.get("all"), color=(80, 220, 255), radius=1, step=30)
+        _draw_points(vis, pts_used.get("all"), color=(80, 220, 255), radius=1, step=20)
+        _draw_points(vis, pts_used.get("left"), color=(255, 190, 0), radius=1, step=8)
+        _draw_points(vis, pts_used.get("right"), color=(255, 190, 0), radius=1, step=8)
+        _draw_points(vis, pts_used.get("bottom"), color=(0, 140, 255), radius=1, step=8)
 
-            _draw_polyline(vis, active_dbg.get("hull_abs"), color=(0, 180, 0), thickness=1, closed=True)
-            _draw_polyline(vis, active_dbg.get("contour_abs"), color=(0, 128, 255), thickness=1, closed=True)
+    # ----------------------------
+    # Fitted notch lines
+    # ----------------------------
+    geom = _extract_lines_and_anchors(stab_info)
 
-        elif method == "legacy_dot_band_lines":
-            _draw_points(vis, pts_used.get("left"), color=(80, 80, 255), radius=1, step=12)
-            _draw_points(vis, pts_used.get("right"), color=(80, 80, 255), radius=1, step=12)
-            _draw_points(vis, pts_used.get("bottom"), color=(80, 80, 255), radius=1, step=12)
+    if show_lines:
+        _draw_fitline_clipped(vis, geom.get("left_line"), color=(0, 255, 0), thickness=2)
+        _draw_fitline_clipped(vis, geom.get("right_line"), color=(0, 255, 0), thickness=2)
+        _draw_fitline_clipped(vis, geom.get("bottom_line"), color=(0, 165, 255), thickness=2)
+
+    # ----------------------------
+    # Bottom-frame anchors only
+    # ----------------------------
+    if show_anchors:
+        for name, color in (
+            ("bottom_left", (0, 165, 255)),
+            ("bottom_right", (0, 165, 255)),
+            ("bottom_mid", (0, 0, 255)),
+        ):
+            pt = geom.get(name)
+            p = _safe_cv_pt(pt)
+
+            if p is None:
+                continue
+
+            x, y = p
+
+            cv2.circle(vis, (x, y), 7, color, -1, lineType=cv2.LINE_AA)
+            cv2.circle(vis, (x, y), 9, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+            _put_text(vis, name, (x + 8, y - 8), scale=0.45, color=color)
+
+        bl = _safe_cv_pt(geom.get("bottom_left"))
+        br = _safe_cv_pt(geom.get("bottom_right"))
+
+        if bl is not None and br is not None:
+            cv2.line(vis, bl, br, (0, 165, 255), 2, lineType=cv2.LINE_AA)
+
+        # New side-wall centerline debug.
+        roi_dbg = _as_dict(stab_info.get("roi_frame_debug"))
+        cdy = _safe_cv_pt(roi_dbg.get("center_at_dy"))
+        ldy = _safe_cv_pt(roi_dbg.get("left_at_dy"))
+        rdy = _safe_cv_pt(roi_dbg.get("right_at_dy"))
+
+        if ldy is not None and rdy is not None:
+            cv2.line(vis, ldy, rdy, (255, 180, 0), 1, lineType=cv2.LINE_AA)
+
+        if cdy is not None:
+            x, y = cdy
+            cv2.circle(vis, (x, y), 6, (255, 180, 0), -1, lineType=cv2.LINE_AA)
+            _put_text(vis, "side_center@dy", (x + 8, y - 8), scale=0.45, color=(255, 180, 0))
+
+    # Always show target/correction if engine provides it.
+    _draw_expected_center_guidance(vis, stab_info)
 
     # ----------------------------
     # Legacy fallback debug
@@ -259,100 +610,81 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
         for _name, line in legacy_lines.items():
             _draw_fitline_clipped(vis, line, color=(180, 80, 180), thickness=1)
 
-        if method == "legacy_dot_band_lines":
-            _put_text(vis, "LEGACY ACTIVE", (16, 220), scale=0.7, color=(120, 80, 255), thickness=2)
-        elif legacy_dbg:
-            _put_text(vis, "legacy debug available", (16, 220), scale=0.5, color=(120, 80, 255))
+        _put_text(vis, "legacy debug", (16, 220), scale=0.5, color=(120, 80, 255))
 
     # ----------------------------
-    # Anchors
-    # ----------------------------
-    if show_anchors:
-        raw_anchors = _as_dict(stab_info.get("anchors_current_raw"))
-        final_anchors = _as_dict(stab_info.get("anchors_current"))
-
-        # Raw anchors: small orange dots.
-        for name in ("left_top", "right_top", "bottom_mid"):
-            pt = raw_anchors.get(name)
-            if _is_good_pt(pt):
-                cv2.circle(vis, _ipt(pt), 3, (0, 165, 255), -1, lineType=cv2.LINE_AA)
-
-        # Final anchors: larger clean dots.
-        for name in ("left_top", "right_top", "bottom_mid"):
-            pt = final_anchors.get(name)
-
-            if not _is_good_pt(pt):
-                continue
-
-            x, y = _ipt(pt)
-
-            if name == "bottom_mid":
-                color = (0, 0, 255)
-            else:
-                color = (0, 255, 0)
-
-            cv2.circle(vis, (x, y), 6, color, -1, lineType=cv2.LINE_AA)
-            cv2.circle(vis, (x, y), 8, (0, 0, 0), 1, lineType=cv2.LINE_AA)
-            _put_text(vis, name, (x + 8, y - 8), scale=0.45, color=color)
-
-        lt = final_anchors.get("left_top")
-        rt = final_anchors.get("right_top")
-        bm = final_anchors.get("bottom_mid")
-
-        # Final anchor skeleton = actual transform model.
-        if _is_good_pt(lt) and _is_good_pt(rt):
-            cv2.line(vis, _ipt(lt), _ipt(rt), (255, 255, 0), 2, lineType=cv2.LINE_AA)
-
-        if _is_good_pt(lt) and _is_good_pt(bm):
-            cv2.line(vis, _ipt(lt), _ipt(bm), (0, 255, 0), 1, lineType=cv2.LINE_AA)
-
-        if _is_good_pt(rt) and _is_good_pt(bm):
-            cv2.line(vis, _ipt(rt), _ipt(bm), (0, 255, 0), 1, lineType=cv2.LINE_AA)
-
-        # Top Y line belongs with anchor model, not points.
-        if "y_top_ref_c" in stab_info:
-            try:
-                yy = int(round(float(stab_info["y_top_ref_c"])))
-                cv2.line(vis, (0, yy), (vis.shape[1] - 1, yy), (255, 255, 255), 1, lineType=cv2.LINE_AA)
-                _put_text(vis, "top_y", (8, yy - 4), scale=0.4, color=(255, 255, 255))
-            except Exception:
-                pass
-
-    # ----------------------------
-    # Mini debug text
+    # Text
     # ----------------------------
     if show_text:
-        top_hyst = _as_dict(stab_info.get("top_anchor_hysteresis"))
-        transform_hyst = _as_dict(stab_info.get("hysteresis"))
-
-        top_mode = str(top_hyst.get("mode", "-"))
-        trans_mode = str(transform_hyst.get("mode", "-"))
-
-        dtrans = transform_hyst.get("dtranslation_px", None)
-        dangle = transform_hyst.get("dangle_deg", None)
+        hyst = _as_dict(stab_info.get("hysteresis"))
+        bp_hyst = _as_dict(stab_info.get("baseplate_hysteresis"))
+        measure = _as_dict(stab_info.get("current_notch_measure"))
+        measure_mm = _as_dict(stab_info.get("current_notch_measure_mm"))
+        offset_display = _as_dict(stab_info.get("current_offset_display"))
+        corr = _as_dict(stab_info.get("baseplate_correction_vector"))
 
         text_lines = [
             f"anchor: {method}",
-            f"top_x: {top_mode}",
-            f"M raw delta: {trans_mode}",
+            f"ROI: {stab_info.get('roi_mode', '-')}",
+            f"M raw delta: {hyst.get('mode', '-')}",
         ]
 
-        if dtrans is not None:
+        if "dtranslation_px" in hyst:
             try:
-                text_lines.append(f"raw dT: {float(dtrans):.1f}px")
+                text_lines.append(f"raw dT: {float(hyst.get('dtranslation_px', 0.0)):.1f}px")
             except Exception:
                 pass
 
-        if dangle is not None:
+        if "dangle_deg" in hyst:
             try:
-                text_lines.append(f"raw dA: {float(dangle):.2f}deg")
+                text_lines.append(f"raw dA: {float(hyst.get('dangle_deg', 0.0)):.2f}deg")
             except Exception:
                 pass
 
-        if method != "solid_edge":
-            solid_reason = _as_dict(stab_info.get("solid_edge_debug")).get("reason")
-            if solid_reason:
-                text_lines.append(f"solid fail: {solid_reason}")
+        if measure_mm:
+            try:
+                text_lines.append(f"offset dx: {float(measure_mm.get('dx', 0.0)):+.2f}mm")
+                text_lines.append(f"offset dy: {float(measure_mm.get('dy', 0.0)):+.2f}mm")
+            except Exception:
+                pass
+        elif offset_display and offset_display.get("unit") == "mm":
+            try:
+                text_lines.append(f"offset dx: {float(offset_display.get('dx', 0.0)):+.2f}mm")
+                text_lines.append(f"offset dy: {float(offset_display.get('dy', 0.0)):+.2f}mm")
+            except Exception:
+                pass
+        elif measure:
+            try:
+                text_lines.append(f"notch dx: {float(measure.get('dx', 0.0)):+.1f}px")
+                text_lines.append(f"notch dy: {float(measure.get('dy', 0.0)):+.1f}px")
+            except Exception:
+                pass
+
+        if measure:
+            try:
+                text_lines.append(f"rel theta: {float(measure.get('relative_angle', 0.0)):+.2f}deg")
+            except Exception:
+                pass
+
+        if corr:
+            try:
+                unit = str(corr.get("unit", "px"))
+                text_lines.append(
+                    f"move: {float(corr.get('screen_dx', 0.0)):+.2f}{unit}, "
+                    f"{float(corr.get('screen_dy', 0.0)):+.2f}{unit}"
+                )
+            except Exception:
+                pass
+
+        px_per_mm = stab_info.get("baseplate_px_per_mm_saved", stab_info.get("baseplate_px_per_mm_frame"))
+        if px_per_mm is not None:
+            try:
+                text_lines.append(f"scale: {float(px_per_mm):.2f}px/mm")
+            except Exception:
+                pass
+
+        if bp_hyst:
+            text_lines.append(f"baseplate: {bp_hyst.get('mode', '-')}")
 
         x0, y0 = 16, 145
         for i, line in enumerate(text_lines):
@@ -362,11 +694,7 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
 # ----------------------------
 # Baseplate overlay
 # ----------------------------
-def draw_baseplate_overlay(vis, roi, center_rel, contour_rel):
-    """
-    Draws the actual live ROI used by detector plus detected baseplate contour.
-    This is the most truthful view of what the app is using for PASS/TRACK.
-    """
+def draw_baseplate_overlay(vis, roi, center_rel, contour_rel, *, roi_poly=None):
     if vis is None or roi is None:
         return
 
@@ -380,10 +708,20 @@ def draw_baseplate_overlay(vis, roi, center_rel, contour_rel):
         (x, y),
         (x + w, y + h),
         (255, 255, 0),
-        2,
+        1,
         lineType=cv2.LINE_AA,
     )
-    _put_text(vis, "live ROI", (x + 4, y + 18), scale=0.5, color=(255, 255, 0))
+
+    if roi_poly is not None:
+        try:
+            poly = np.asarray(roi_poly, dtype=np.int32).reshape(-1, 1, 2)
+            if len(poly) >= 3:
+                cv2.polylines(vis, [poly], True, (255, 255, 0), 2, lineType=cv2.LINE_AA)
+                _put_text(vis, "rotated live ROI", tuple(poly[0, 0]), scale=0.45, color=(255, 255, 0))
+        except Exception:
+            _put_text(vis, "live ROI", (x + 4, y + 18), scale=0.5, color=(255, 255, 0))
+    else:
+        _put_text(vis, "live ROI", (x + 4, y + 18), scale=0.5, color=(255, 255, 0))
 
     if contour_rel is not None:
         try:

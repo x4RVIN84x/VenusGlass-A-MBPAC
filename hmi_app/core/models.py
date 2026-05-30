@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
+
 import numpy as np
 
 
@@ -11,7 +12,8 @@ class Recipe:
     Backwards compatible recipe container.
 
     Legacy layout:
-      recipes/<recipe>/golden_config.json (and cfg contains golden_image_path)
+      recipes/<recipe>/golden_config.json
+      recipes/<recipe>/golden.png
 
     New layout:
       recipes/<recipe>/
@@ -47,9 +49,19 @@ class EngineSettings:
     show_stab: bool = True
     show_baseplate: bool = True
 
-    # Stabilizer debug layer toggles
+    # New overlay toggles used by Auto page
+    show_search_roi: bool = True
+    show_notch_contour: bool = True
+    show_fitted_lines: bool = True
+    show_new_anchors: bool = True
+    show_raw_points: bool = False
+    show_legacy_debug: bool = False
+    show_stabilizer_text: bool = True
+
+    # Older/legacy overlay toggle names.
+    # Keep these so old pages/modules do not crash.
     show_stab_search_roi: bool = True
-    show_stab_feature_points: bool = True
+    show_stab_feature_points: bool = False
     show_stab_anchors: bool = True
     show_stab_legacy: bool = False
     show_stab_text: bool = True
@@ -57,7 +69,7 @@ class EngineSettings:
     # PASS stability gate
     stable_need: int = 5
 
-    # View control for future UI pages
+    # View control
     # "RAW" | "PROC" | "OVERLAY"
     view_mode: str = "OVERLAY"
 
@@ -73,6 +85,18 @@ class QCFrameOutput:
     # Optional, for RAW/PROC/OVERLAY switching
     raw_bgr: Optional[np.ndarray] = None
     proc_bgr: Optional[np.ndarray] = None
+
+    # Real Qt PROC dashboard payload.
+    # Shape:
+    # {
+    #   "main": np.ndarray,
+    #   "feeds": {
+    #       "base_gray": {"title": "...", "image": np.ndarray, "help": "..."},
+    #       ...
+    #   },
+    #   "stats": {...}
+    # }
+    proc_payload: Optional[Dict[str, Any]] = None
 
     # Status + metrics
     status_text: str = ""
