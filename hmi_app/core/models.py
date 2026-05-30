@@ -2,24 +2,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any
+
 import numpy as np
 
 
 @dataclass
 class Recipe:
     """
-    Backwards compatible recipe container.
+    Product/recipe container.
 
     Legacy layout:
-      recipes/<recipe>/golden_config.json (and cfg contains golden_image_path)
+      recipes/<recipe>/golden_config.json
 
-    New layout:
+    Folder-per-config layout:
       recipes/<recipe>/
         active_config.txt
         configs/<config_name>/
           golden_config.json
-          golden.(png|jpg|jpeg)
+          golden.png
     """
+
     name: str
 
     # Paths
@@ -43,21 +45,23 @@ class EngineSettings:
     stab_every_n: int = 6
     search_padding_px: int = 120
 
-    # Master overlay toggles
+    # Overlay toggles
     show_stab: bool = True
     show_baseplate: bool = True
 
-    # Stabilizer debug layer toggles
-    show_stab_search_roi: bool = True
-    show_stab_feature_points: bool = True
-    show_stab_anchors: bool = True
-    show_stab_legacy: bool = False
-    show_stab_text: bool = True
+    # Optional layer toggles used by overlay.py in newer builds.
+    show_search_roi: bool = True
+    show_notch_contour: bool = True
+    show_fitted_lines: bool = True
+    show_new_anchors: bool = True
+    show_raw_points: bool = False
+    show_legacy_debug: bool = False
+    show_stabilizer_text: bool = True
 
     # PASS stability gate
     stable_need: int = 5
 
-    # View control for future UI pages
+    # View control
     # "RAW" | "PROC" | "OVERLAY"
     view_mode: str = "OVERLAY"
 
@@ -73,6 +77,18 @@ class QCFrameOutput:
     # Optional, for RAW/PROC/OVERLAY switching
     raw_bgr: Optional[np.ndarray] = None
     proc_bgr: Optional[np.ndarray] = None
+
+    # New real Qt PROC dashboard payload.
+    # Shape:
+    # {
+    #   "main": np.ndarray,
+    #   "feeds": {
+    #       "base_gray": {"title": "...", "image": np.ndarray, "help": "..."},
+    #       ...
+    #   },
+    #   "stats": {...}
+    # }
+    proc_payload: Optional[Dict[str, Any]] = None
 
     # Status + metrics
     status_text: str = ""

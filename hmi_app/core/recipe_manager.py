@@ -1,3 +1,4 @@
+# hmi_app/core/recipe_manager.py (FULL REWRITE)
 from __future__ import annotations
 
 import json
@@ -14,9 +15,9 @@ def _safe_load_json(path: str) -> dict:
         return json.load(f)
 
 
-def _find_golden_image_in_dir(recipe_dir: str) -> Optional[str]:
+def _find_golden_image_in_dir(product_dir: str) -> Optional[str]:
     for name in ("golden.png", "golden.jpg", "golden.jpeg"):
-        p = os.path.join(recipe_dir, name)
+        p = os.path.join(product_dir, name)
         if os.path.isfile(p):
             return p
     return None
@@ -24,16 +25,17 @@ def _find_golden_image_in_dir(recipe_dir: str) -> Optional[str]:
 
 class RecipeManager:
     """
-    Flat product/recipe manager.
+    Flat product manager.
 
-    One folder == one complete product definition:
-
-      recipes/<product_name>/
+    Preferred layout:
+      recipes/<PRODUCT_NAME>/
         golden_config.json
         golden.png
 
-    The old nested configs layout is still readable as a legacy fallback, but new
-    products are created as flat recipe folders by CalibrationPage.
+    Backwards compatibility:
+      If old nested configs exist, they are listed as products using the name:
+        <recipe>__<config>
+      but new products are always flat folders.
     """
 
     def __init__(self, recipes_root: str = "recipes"):
@@ -47,115 +49,95 @@ class RecipeManager:
             return []
 
         out: List[str] = []
+
         for name in sorted(os.listdir(self.recipes_root)):
-            recipe_dir = os.path.join(self.recipes_root, name)
-            if not os.path.isdir(recipe_dir):
+            product_dir = os.path.join(self.recipes_root, name)
+            if not os.path.isdir(product_dir):
                 continue
 
-            if os.path.isfile(os.path.join(recipe_dir, "golden_config.json")):
+            cfg = os.path.join(product_dir, "golden_config.json")
+            if os.path.isfile(cfg):
                 out.append(name)
                 continue
 
-            # Backward compatibility: old nested configs count as loadable recipes.
-            configs_dir = os.path.join(recipe_dir, "configs")
+            # Compatibility only: expose old configs as selectable product-like entries.
+            configs_dir = os.path.join(product_dir, "configs")
             if os.path.isdir(configs_dir):
                 for cfg_name in sorted(os.listdir(configs_dir)):
                     cfg_dir = os.path.join(configs_dir, cfg_name)
-                    if os.path.isdir(cfg_dir) and os.path.isfile(os.path.join(cfg_dir, "golden_config.json")):
-                        out.append(name)
-                        break
+                    if not os.path.isdir(cfg_dir):
+                        continue
+                    if os.path.isfile(os.path.join(cfg_dir, "golden_config.json")):
+                        out.append(f"{name}__{cfg_name}")
 
         return out
 
-    # Kept only so old pages/modules do not explode. New UI should not use it.
+    # Compatibility stubs for older pages/code. Flat products do not have sub-configs.
     def list_configs(self, recipe_name: str) -> List[str]:
-        recipe_dir = os.path.join(self.recipes_root, recipe_name)
-        configs_dir = os.path.join(recipe_dir, "configs")
-        if not os.path.isdir(configs_dir):
-            return []
+        return []
 
-        out: List[str] = []
-        for cfg_name in sorted(os.listdir(configs_dir)):
-            cfg_dir = os.path.join(configs_dir, cfg_name)
-            if os.path.isdir(cfg_dir) and os.path.isfile(os.path.join(cfg_dir, "golden_config.json")):
-                out.append(cfg_name)
-        return out
-
-    # Legacy compatibility no-ops/readers.
     def get_active_config_name(self, recipe_name: str) -> Optional[str]:
-        p = os.path.join(self.recipes_root, recipe_name, "active_config.txt")
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                s = f.read().strip()
-            return s or None
-        except Exception:
-            return None
+        return None
 
     def set_active_config_name(self, recipe_name: str, config_name: str) -> None:
-        # Kept for old callers. New product flow does not use active_config.txt.
-        recipe_dir = os.path.join(self.recipes_root, recipe_name)
-        os.makedirs(recipe_dir, exist_ok=True)
-        with open(os.path.join(recipe_dir, "active_config.txt"), "w", encoding="utf-8") as f:
-            f.write((config_name or "").strip() + "\n")
+        return None
 
     # ----------------------------
     # Loading
     # ----------------------------
-    def _resolve_paths(self, recipe_name: str, config_name: Optional[str] = None) -> Tuple[bool, str, str, str]:
-        """
-        Returns:
-          is_legacy_nested, recipe_dir, config_name_resolved, config_dir
+    def _resolve_product_paths(self, product_name: str, config_name: Optional[str] = None) -> Tuple[str, str, str]:
+        product_name = (product_name or "").strip()
+        if not product_name:
+            raise FileNotFoundError("No product name supplied")
 
-        Flat preferred:
-          recipes/<recipe>/golden_config.json
+        # Preferred flat path.
+        product_dir = os.path.join(self.recipes_root, product_name)
+        cfg_path = os.path.join(product_dir, "golden_config.json")
+        if os.path.isfile(cfg_path):
+            return product_name, product_dir, cfg_path
 
-        Legacy nested fallback:
-          recipes/<recipe>/configs/<config>/golden_config.json
-        """
-        recipe_dir = os.path.join(self.recipes_root, recipe_name)
-        if not os.path.isdir(recipe_dir):
-            raise FileNotFoundError(f"Recipe/product folder not found: {recipe_dir}")
+        # Compatibility: product__config maps to old nested config path.
+        if "__" in product_name:
+            base, cfg = product_name.split("__", 1)
+            cfg_dir = os.path.join(self.recipes_root, base, "configs", cfg)
+            cfg_path = os.path.join(cfg_dir, "golden_config.json")
+            if os.path.isfile(cfg_path):
+                return product_name, cfg_dir, cfg_path
 
-        flat_cfg = os.path.join(recipe_dir, "golden_config.json")
-        if os.path.isfile(flat_cfg):
-            return False, recipe_dir, recipe_name, recipe_dir
+        # Compatibility: explicit config_name for old nested path.
+        if config_name:
+            cfg_dir = os.path.join(self.recipes_root, product_name, "configs", config_name)
+            cfg_path = os.path.join(cfg_dir, "golden_config.json")
+            if os.path.isfile(cfg_path):
+                return f"{product_name}__{config_name}", cfg_dir, cfg_path
 
-        configs = self.list_configs(recipe_name)
-        if configs:
-            chosen = (config_name or self.get_active_config_name(recipe_name) or configs[0]).strip()
-            if chosen not in configs:
-                chosen = configs[0]
-            return True, recipe_dir, chosen, os.path.join(recipe_dir, "configs", chosen)
-
-        raise FileNotFoundError(f"Missing golden_config.json for product: {recipe_dir}")
+        raise FileNotFoundError(f"Product folder/config not found: {product_dir}")
 
     def load(self, recipe_name: str, config_name: Optional[str] = None) -> Recipe:
-        is_legacy_nested, recipe_dir, cfg_name, config_dir = self._resolve_paths(recipe_name, config_name)
-
-        cfg_path = os.path.join(config_dir, "golden_config.json")
+        product_name, product_dir, cfg_path = self._resolve_product_paths(recipe_name, config_name)
         cfg = _safe_load_json(cfg_path)
 
         golden_path = cfg.get("golden_image_path")
         if golden_path:
             if not os.path.isabs(golden_path):
-                golden_path = os.path.normpath(os.path.join(config_dir, golden_path))
+                golden_path = os.path.normpath(os.path.join(product_dir, golden_path))
         else:
-            golden_path = _find_golden_image_in_dir(config_dir)
+            golden_path = _find_golden_image_in_dir(product_dir)
             if not golden_path:
-                raise ValueError(f"golden_image_path missing and no golden image found in {config_dir}")
+                raise ValueError(f"golden_image_path missing and no golden image found in {product_dir}")
 
         golden = cv2.imread(golden_path)
         if golden is None:
             raise FileNotFoundError(f"Could not load golden image: {golden_path}")
 
         return Recipe(
-            name=recipe_name,
-            recipe_dir=recipe_dir,
-            config_name=cfg_name,
-            config_dir=config_dir,
+            name=product_name,
+            recipe_dir=product_dir,
+            config_name=product_name,
+            config_dir=product_dir,
             config_path=cfg_path,
             golden_image_path=golden_path,
             cfg=cfg,
             golden_bgr=golden,
-            is_legacy=is_legacy_nested,
+            is_legacy=False,
         )

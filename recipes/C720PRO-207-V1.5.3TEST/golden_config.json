@@ -1,14 +1,14 @@
 {
     "golden_image_path": "golden.png",
     "roi": [
-        513,
-        348,
-        211,
-        244
+        17,
+        125,
+        1203,
+        595
     ],
     "expected_center": [
-        146.5,
-        118.0
+        612.5906040369096,
+        336.40575572693655
     ],
     "expected_angle": 0.0,
     "tolerance_px": {
@@ -57,13 +57,55 @@
         114.53720092773438
     ],
     "baseplate_center_source": "auto",
-    "canny_low": 58,
+    "canny_low": 60,
     "canny_high": 150,
-    "blur_ksize": 7,
+    "blur_ksize": 3,
     "clahe_clip": 1.5,
     "dilate_iter": 1,
-    "close_iter": 2,
-    "contrast_min": 5.0,
+    "close_iter": 3,
+    "contrast_min": 4.5,
     "prefer_solid_edge": true,
-    "hysteresis_enabled": true
+    "hysteresis_enabled": true,
+    "notch_blur_ksize": 21,
+    "notch_close_ksize": 11,
+    "notch_open_ksize": 7,
+    "notch_threshold_bias": 1.0,
+    "prefer_dark_region": true,
+    "expected_notch_frame": {
+        "coord_model": "bottom_mid_local_frame",
+        "dx": -2.5327387868992153,
+        "dy": 185.94014949925628,
+        "frame_dx": -2.5327387868992153,
+        "frame_dy": 185.94014949925628,
+        "sidewall_dx": -3.093233476502348,
+        "sidewall_dy": 185.94014949925628,
+        "relative_angle": -1.9040652165903584,
+        "notch_angle": 1.9040652165903584
+    },
+    "notch_bottom_band_frac": 0.35,
+    "notch_side_band_frac": 0.35,
+    "notch_frame_roi_extra_pad": 6,
+    "baseplate_roi_extra_pad": 6,
+    "baseplate_width_mm": 20.4,
+    "baseplate_height_mm": 26.5,
+    "baseplate_dimensions_mm": {
+        "width": 20.4,
+        "height": 26.5
+    },
+    "px_per_mm": 4.313448020717722,
+    "mm_per_px": 0.23183309389540488,
+    "baseplate_px_per_mm": 4.313448020717722,
+    "baseplate_scale": {
+        "px_per_mm": 4.313448020717722,
+        "mm_per_px": 0.23183309389540488,
+        "rect_w_px": 113.0,
+        "rect_h_px": 89.0,
+        "baseplate_width_mm": 20.4,
+        "baseplate_height_mm": 26.5,
+        "ratio_disagreement": 0.022599109603561606,
+        "baseplate_dimensions_mm": {
+            "width": 20.4,
+            "height": 26.5
+        }
+    }
 }

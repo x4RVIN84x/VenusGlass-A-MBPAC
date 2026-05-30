@@ -1,3 +1,4 @@
+# hmi_app/gui/main_window.py (FULL REWRITE)
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,27 +17,17 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
-from hmi_app.gui.styles import industrial_dark_stylesheet
-from hmi_app.core.recipe_manager import RecipeManager
 from hmi_app.core.engine import QCPreviewEngine
-from hmi_app.io.camera import OpenCVCamera
-
+from hmi_app.core.recipe_manager import RecipeManager
 from hmi_app.gui.pages.auto_page import AutoPage
 from hmi_app.gui.pages.calibration_page import CalibrationPage
 from hmi_app.gui.pages.manual_test_page import ManualTestPage
 from hmi_app.gui.pages.placeholder import PlaceholderPage
+from hmi_app.gui.styles import industrial_dark_stylesheet
+from hmi_app.io.camera import OpenCVCamera
 
 
 class MainWindow(QMainWindow):
-    """
-    Main app shell.
-
-    Important terminology cleanup:
-      - The top dropdown is the PRODUCT / RECIPE selector.
-      - There is no separate active config concept anymore.
-      - One recipe folder == one complete product definition.
-    """
-
     AUTO_CONTROLS_FIXED_W = 420
 
     def __init__(self):
@@ -53,8 +44,6 @@ class MainWindow(QMainWindow):
 
         self.recipe_manager = RecipeManager(recipes_root=str(recipes_path))
         self.engine = QCPreviewEngine()
-
-        # Shared camera for all pages.
         self.cam = OpenCVCamera(index=0, width=1280, height=720, fps=30, use_dshow=True)
 
         root = QWidget()
@@ -64,9 +53,9 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(12)
 
-        # =========================
+        # -------------------------
         # Top bar
-        # =========================
+        # -------------------------
         top = QFrame()
         top.setFixedHeight(64)
         top_lay = QHBoxLayout(top)
@@ -76,9 +65,9 @@ class MainWindow(QMainWindow):
         lbl_title = QLabel("MBPAC QC Station")
         lbl_title.setStyleSheet("font-size: 18px; font-weight: 900;")
 
-        lbl_recipe = QLabel("Product/Recipe:")
+        lbl_product = QLabel("Product/Recipe:")
         self.cmb_recipe = QComboBox()
-        self.cmb_recipe.setMinimumWidth(240)
+        self.cmb_recipe.setMinimumWidth(260)
 
         self.badge = QLabel("IDLE")
         self.badge.setAlignment(Qt.AlignCenter)
@@ -99,14 +88,14 @@ class MainWindow(QMainWindow):
 
         top_lay.addWidget(lbl_title)
         top_lay.addStretch(1)
-        top_lay.addWidget(lbl_recipe)
+        top_lay.addWidget(lbl_product)
         top_lay.addWidget(self.cmb_recipe, 0)
         top_lay.addWidget(self.badge, 0)
         outer.addWidget(top)
 
-        # =========================
+        # -------------------------
         # Body
-        # =========================
+        # -------------------------
         body = QHBoxLayout()
         body.setSpacing(12)
         outer.addLayout(body, 1)
@@ -132,12 +121,11 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         body.addWidget(self.stack, 1)
 
-        # Real pages
         self.page_cal = CalibrationPage(
             engine=self.engine,
             recipe_manager=self.recipe_manager,
             cam=self.cam,
-            on_products_changed=self.refresh_product_list,
+            on_products_changed=self.reload_products,
         )
         self.page_manual = ManualTestPage(engine=self.engine, recipe_manager=self.recipe_manager, cam=self.cam)
         self.page_auto = AutoPage(engine=self.engine, cam=self.cam)
@@ -155,11 +143,8 @@ class MainWindow(QMainWindow):
 
         self.stack.setCurrentWidget(self.page_auto)
 
-        # =========================
-        # Recipe wiring
-        # =========================
         self._loading_products = False
-        self.refresh_product_list()
+        self.reload_products()
         self.cmb_recipe.currentTextChanged.connect(self.on_recipe_changed)
 
         if self.cmb_recipe.count() > 0:
@@ -172,10 +157,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._stabilize_auto_layout)
 
     # -------------------------
-    # Product list/load
+    # Product loading
     # -------------------------
-    def refresh_product_list(self, select_name: str | None = None):
-        current = (select_name or self.cmb_recipe.currentText() or "").strip()
+    def reload_products(self, select_name: str | None = None):
+        previous = (select_name or self.cmb_recipe.currentText() or "").strip()
 
         self._loading_products = True
         self.cmb_recipe.blockSignals(True)
@@ -185,17 +170,21 @@ class MainWindow(QMainWindow):
             for p in products:
                 self.cmb_recipe.addItem(p)
 
-            if products:
-                if current in products:
-                    self.cmb_recipe.setCurrentText(current)
-                else:
-                    self.cmb_recipe.setCurrentIndex(0)
+            if previous and previous in products:
+                self.cmb_recipe.setCurrentText(previous)
+            elif products:
+                self.cmb_recipe.setCurrentIndex(0)
         finally:
             self.cmb_recipe.blockSignals(False)
             self._loading_products = False
 
-        if self.cmb_recipe.count() > 0:
-            self.on_recipe_changed(self.cmb_recipe.currentText())
+        current = (self.cmb_recipe.currentText() or "").strip()
+        if current:
+            self.on_recipe_changed(current)
+
+    # Backwards-compatible hook name.
+    def refresh_recipe_list(self, select_name: str | None = None):
+        self.reload_products(select_name=select_name)
 
     def on_recipe_changed(self, name: str):
         if self._loading_products:
@@ -211,26 +200,25 @@ class MainWindow(QMainWindow):
             recipe = self.recipe_manager.load(name)
             self.engine.set_recipe(recipe)
             self.set_state("READY")
-            print(f"[HMI] loaded product/recipe: {recipe.name}")
+            print(f"[HMI] loaded product: {recipe.name}")
 
-            # Notify pages.
             try:
-                self.page_cal.set_recipe_name(name)
+                self.page_cal.set_recipe_name(recipe.name)
             except Exception as e:
                 print("[HMI] page_cal.set_recipe_name failed:", e)
 
             try:
-                self.page_manual.set_recipe_name(name)
+                self.page_manual.set_recipe_name(recipe.name)
             except Exception as e:
                 print("[HMI] page_manual.set_recipe_name failed:", e)
 
         except Exception as e:
             self.engine.recipe = None
             self.set_state("FAULT")
-            print(f"[HMI] failed to load product/recipe {name}: {e}")
+            print(f"[HMI] failed to load product {name}: {e}")
 
     # -------------------------
-    # State badge
+    # Badge / layout
     # -------------------------
     def set_state(self, text: str):
         colors = {
@@ -255,9 +243,6 @@ class MainWindow(QMainWindow):
                 """
             )
 
-    # -------------------------
-    # Layout stabilization
-    # -------------------------
     def _stabilize_auto_layout(self):
         try:
             page = getattr(self, "page_auto", None)
@@ -274,9 +259,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print("[HMI] _stabilize_auto_layout error:", e)
 
-    # -------------------------
-    # Shutdown
-    # -------------------------
     def closeEvent(self, event):
         try:
             if getattr(self, "page_auto", None) is not None:
