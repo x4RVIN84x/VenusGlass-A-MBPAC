@@ -13,6 +13,9 @@ from hmi_app.core.models import Recipe, EngineSettings, QCFrameOutput
 from hmi_app.core.overlay import draw_stab_debug, draw_baseplate_overlay, draw_status_box
 
 
+# ----------------------------
+# Basic image / ROI helpers
+# ----------------------------
 def clamp_roi(roi, W, H):
     x, y, w, h = map(int, roi)
 
@@ -88,6 +91,9 @@ def _safe_float(v, default=None):
     return x
 
 
+# ----------------------------
+# Pixel/mm scale helpers
+# ----------------------------
 def _saved_px_per_mm(cfg: Dict[str, Any]):
     if not isinstance(cfg, dict):
         return None
@@ -159,7 +165,6 @@ def _estimate_px_per_mm_from_contour(contour_rel, cfg: Dict[str, Any]):
     if rw <= 1 or rh <= 1:
         return None
 
-    # Try both orientation assignments.
     s1a = rw / w_mm
     s1b = rh / h_mm
     err1 = abs(s1a - s1b)
@@ -205,6 +210,9 @@ def _px_to_display(dx_px, dy_px, cfg, frame_scale_info=None):
     }
 
 
+# ----------------------------
+# Notch-frame coordinate helpers
+# ----------------------------
 def _point_to_notch_frame(pt, notch_frame: Dict[str, Any]):
     if pt is None or not isinstance(notch_frame, dict):
         return None
@@ -305,6 +313,154 @@ def _line_angle_from_notch_frame(notch_frame):
         return 0.0
 
 
+def _extract_notch_frame(stab_info):
+    if not isinstance(stab_info, dict):
+        return None
+
+    for key in ("notch_frame", "current_notch_frame", "notch_frame_runtime"):
+        nf = stab_info.get(key)
+
+        if isinstance(nf, dict):
+            if "origin" in nf and "x_axis" in nf and "y_axis" in nf:
+                return nf
+
+    return None
+
+
+# ----------------------------
+# Live rotated ROI from notch-frame
+# ----------------------------
+def _rotated_rect_poly(center_xy, width_px, height_px, angle_deg):
+    cx, cy = map(float, center_xy)
+    w = max(2.0, float(width_px))
+    h = max(2.0, float(height_px))
+
+    a = np.deg2rad(float(angle_deg))
+
+    ux = np.array([np.cos(a), np.sin(a)], dtype=np.float64)
+    uy = np.array([np.sin(a), -np.cos(a)], dtype=np.float64)
+
+    c = np.array([cx, cy], dtype=np.float64)
+    hw = 0.5 * w
+    hh = 0.5 * h
+
+    pts = np.array(
+        [
+            c - ux * hw - uy * hh,
+            c + ux * hw - uy * hh,
+            c + ux * hw + uy * hh,
+            c - ux * hw + uy * hh,
+        ],
+        dtype=np.float32,
+    )
+
+    return pts
+
+
+def _bbox_from_poly(poly, W, H, pad=8):
+    if poly is None:
+        return None
+
+    try:
+        pts = np.asarray(poly, dtype=np.float32).reshape(-1, 2)
+    except Exception:
+        return None
+
+    if pts.size == 0 or not np.isfinite(pts).all():
+        return None
+
+    p = int(max(0, pad))
+
+    x0 = int(np.floor(np.min(pts[:, 0]))) - p
+    y0 = int(np.floor(np.min(pts[:, 1]))) - p
+    x1 = int(np.ceil(np.max(pts[:, 0]))) + p
+    y1 = int(np.ceil(np.max(pts[:, 1]))) + p
+
+    x0 = max(0, min(x0, int(W) - 1))
+    y0 = max(0, min(y0, int(H) - 1))
+    x1 = max(x0 + 1, min(x1, int(W)))
+    y1 = max(y0 + 1, min(y1, int(H)))
+
+    return int(x0), int(y0), int(x1 - x0), int(y1 - y0)
+
+
+def _build_live_roi_from_notch_frame(cfg, notch_frame, W, H):
+    """
+    Build LIVE baseplate ROI directly from the detected bottom-notch frame.
+
+    This avoids depending on the stabilizer affine bbox if that bbox becomes stale.
+    """
+    if not isinstance(cfg, dict) or not isinstance(notch_frame, dict):
+        return None, None, "missing_cfg_or_notch_frame", None
+
+    expected_nf = cfg.get("expected_notch_frame")
+
+    if not isinstance(expected_nf, dict):
+        return None, None, "missing_expected_notch_frame", None
+
+    exp_dx = _safe_float(
+        expected_nf.get("frame_dx", expected_nf.get("dx", expected_nf.get("sidewall_dx", None))),
+        None,
+    )
+    exp_dy = _safe_float(
+        expected_nf.get("frame_dy", expected_nf.get("dy", expected_nf.get("sidewall_dy", None))),
+        None,
+    )
+
+    if exp_dx is None or exp_dy is None:
+        return None, None, "bad_expected_notch_frame_dxdy", None
+
+    center = _point_from_notch_frame(notch_frame, exp_dx, exp_dy)
+
+    if center is None:
+        return None, None, "notch_frame_center_failed", None
+
+    roi_size_src = cfg.get("baseplate_roi", cfg.get("roi", (0, 0, 140, 180)))
+
+    try:
+        _rx, _ry, rw, rh = map(float, roi_size_src)
+    except Exception:
+        rw, rh = 140.0, 180.0
+
+    roi_scale = float(cfg.get("notch_frame_roi_scale", 1.0))
+
+    extra_pad = float(cfg.get("baseplate_roi_extra_pad", 8.0))
+    extra_w = float(cfg.get("notch_frame_roi_extra_w", extra_pad)) * 2.0
+    extra_h = float(cfg.get("notch_frame_roi_extra_h", extra_pad)) * 2.0
+
+    live_w = max(20.0, rw * roi_scale + extra_w)
+    live_h = max(20.0, rh * roi_scale + extra_h)
+
+    notch_angle = _safe_float(notch_frame.get("angle_deg"), 0.0)
+
+    poly = _rotated_rect_poly(center, live_w, live_h, notch_angle)
+
+    bbox = _bbox_from_poly(
+        poly,
+        W,
+        H,
+        pad=int(cfg.get("rotated_roi_bbox_pad", 8)),
+    )
+
+    if bbox is None:
+        return None, None, "rotated_roi_bbox_failed", None
+
+    frame_debug = {
+        "roi_center_abs": [float(center[0]), float(center[1])],
+        "expected_dx": float(exp_dx),
+        "expected_dy": float(exp_dy),
+        "roi_size_src": list(map(float, roi_size_src)),
+        "live_w": float(live_w),
+        "live_h": float(live_h),
+        "notch_angle": float(notch_angle),
+    }
+
+    return bbox, poly, "expected_notch_frame_rotated_roi", frame_debug
+
+
+# ----------------------------
+# PROC diagnostic helpers
+# ----------------------------
 def _compose_proc_full(raw_bgr: np.ndarray, roi_xywh: Tuple[int, int, int, int], proc_crop_bgr: Optional[np.ndarray]) -> np.ndarray:
     H, W = raw_bgr.shape[:2]
     bg = cv2.cvtColor(cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
@@ -324,12 +480,6 @@ def _compose_proc_full(raw_bgr: np.ndarray, roi_xywh: Tuple[int, int, int, int],
 
 
 def _build_proc_diagnostic_view(raw, roi_live, roi_poly, center_abs, contour_abs, stab_info, dbg, status_text):
-    """
-    Fallback/portable PROC view.
-
-    The fancy Qt dashboard can use proc_payload, but this image keeps PROC mode
-    useful even if the dashboard page is not wired in.
-    """
     if raw is None:
         return None, None
 
@@ -341,8 +491,10 @@ def _build_proc_diagnostic_view(raw, roi_live, roi_poly, center_abs, contour_abs
     grid = heat.copy()
 
     step = max(40, int(round(min(W, H) / 18)))
+
     for x in range(0, W, step):
         cv2.line(grid, (x, 0), (x, H), (25, 25, 25), 1, cv2.LINE_AA)
+
     for y in range(0, H, step):
         cv2.line(grid, (0, y), (W, y), (25, 25, 25), 1, cv2.LINE_AA)
 
@@ -351,6 +503,7 @@ def _build_proc_diagnostic_view(raw, roi_live, roi_poly, center_abs, contour_abs
     if roi_poly is not None:
         try:
             poly = np.asarray(roi_poly, dtype=np.int32).reshape(-1, 1, 2)
+
             if len(poly) >= 3:
                 cv2.polylines(main, [poly], True, (255, 255, 0), 2, cv2.LINE_AA)
         except Exception:
@@ -364,14 +517,17 @@ def _build_proc_diagnostic_view(raw, roi_live, roi_poly, center_abs, contour_abs
 
     if isinstance(stab_info, dict):
         nf = stab_info.get("notch_frame")
+
         if isinstance(nf, dict):
             anchors = nf.get("anchors") or {}
+
             for name, color in (
                 ("bottom_left", (0, 200, 255)),
                 ("bottom_right", (0, 200, 255)),
                 ("bottom_mid", (0, 0, 255)),
             ):
                 p = anchors.get(name)
+
                 try:
                     px, py = int(round(float(p[0]))), int(round(float(p[1])))
                     cv2.circle(main, (px, py), 7, color, -1, cv2.LINE_AA)
@@ -403,8 +559,10 @@ def _build_proc_diagnostic_view(raw, roi_live, roi_poly, center_abs, contour_abs
 
     if isinstance(stab_info, dict):
         active_dbg = stab_info.get("solid_edge_debug") or stab_info.get("legacy_lines_debug") or {}
+
         if isinstance(active_dbg, dict):
             dbg_frames = active_dbg.get("dbg")
+
             if isinstance(dbg_frames, dict):
                 for key, title, help_text in (
                     ("gray0", "Raw grayscale", "The camera image converted to brightness only."),
@@ -421,6 +579,7 @@ def _build_proc_diagnostic_view(raw, roi_live, roi_poly, center_abs, contour_abs
 
     if isinstance(dbg, dict):
         dframes = dbg.get("dbg")
+
         if isinstance(dframes, dict):
             for key, title in (
                 ("gray2_contrast", "Baseplate contrast"),
@@ -444,6 +603,9 @@ def _build_proc_diagnostic_view(raw, roi_live, roi_poly, center_abs, contour_abs
     return main, payload
 
 
+# ----------------------------
+# Engine
+# ----------------------------
 class QCPreviewEngine:
     def __init__(self):
         self.recipe: Optional[Recipe] = None
@@ -463,7 +625,10 @@ class QCPreviewEngine:
     def set_recipe(self, recipe: Recipe):
         self.recipe = recipe
         self._frame_i = 0
-        self._roi_live = tuple(recipe.cfg["roi"])
+
+        # Use actual baseplate ROI if present.
+        self._roi_live = tuple(recipe.cfg.get("baseplate_roi", recipe.cfg.get("roi", (0, 0, 1, 1))))
+
         self._roi_live_poly = None
         self._stab_info = None
         self._stable_have = 0
@@ -516,7 +681,11 @@ class QCPreviewEngine:
 
         H, W = raw.shape[:2]
 
-        roi_cfg = tuple(cfg["roi"])
+        # IMPORTANT:
+        # baseplate_roi is the actual metal-part detector ROI.
+        # roi is often the larger glass / registration ROI in older product JSON.
+        roi_cfg_raw = cfg.get("baseplate_roi", cfg.get("roi", (0, 0, 1, 1)))
+        roi_cfg = tuple(roi_cfg_raw)
 
         if self._roi_live is None:
             self._roi_live = roi_cfg
@@ -556,14 +725,49 @@ class QCPreviewEngine:
                 hysteresis_enabled=bool(cfg.get("hysteresis_enabled", True)),
             )
 
-            self._stab_info = info
+            self._stab_info = info if isinstance(info, dict) else {}
 
-            if moved is not None and info and info.get("ok"):
+            notch_frame = _extract_notch_frame(self._stab_info)
+
+            bbox = None
+            poly = None
+            roi_mode = "fallback"
+            roi_frame_debug = None
+
+            if notch_frame is not None:
+                bbox, poly, roi_mode, roi_frame_debug = _build_live_roi_from_notch_frame(
+                    cfg,
+                    notch_frame,
+                    W,
+                    H,
+                )
+
+            # Best path: direct ROI from live notch frame.
+            if bbox is not None:
+                self._roi_live = self._apply_recipe_roi_offset(bbox, cfg, W, H)
+                self._roi_live_poly = poly
+
+            # Fallback: stabilizer affine ROI.
+            elif moved is not None and self._stab_info.get("ok"):
                 self._roi_live = self._apply_recipe_roi_offset(moved[0], cfg, W, H)
-                self._roi_live_poly = info.get("roi_poly_current")
-            elif self._roi_live is None:
+                self._roi_live_poly = self._stab_info.get("roi_poly_current")
+                roi_mode = "fallback_stabilized_bbox"
+
+            # Final fallback: static baseplate ROI.
+            else:
                 self._roi_live = self._apply_recipe_roi_offset(roi_cfg, cfg, W, H)
                 self._roi_live_poly = None
+                roi_mode = "fallback_recipe_baseplate_roi"
+
+            if isinstance(self._stab_info, dict):
+                self._stab_info["notch_frame_runtime"] = notch_frame
+                self._stab_info["roi_mode"] = roi_mode
+                self._stab_info["roi_frame_debug"] = roi_frame_debug
+                self._stab_info["live_roi"] = self._roi_live
+                self._stab_info["live_roi_poly"] = (
+                    None if self._roi_live_poly is None
+                    else np.asarray(self._roi_live_poly).tolist()
+                )
 
         crop, roi_live = safe_crop(raw, self._roi_live)
 
@@ -590,7 +794,10 @@ class QCPreviewEngine:
             contrast_min=float(cfg.get("contrast_min", 6.0)),
         )
 
-        want_proc = bool(getattr(self.settings, "compute_proc", False)) or (str(getattr(self.settings, "view_mode", "OVERLAY")).upper() == "PROC")
+        want_proc = (
+            bool(getattr(self.settings, "compute_proc", False))
+            or str(getattr(self.settings, "view_mode", "OVERLAY")).upper() == "PROC"
+        )
 
         if want_proc:
             center_rel, angle, contour_rel, dbg = detect_baseplate(
@@ -798,8 +1005,6 @@ class QCPreviewEngine:
                     "screen_dy_px": float(screen_dy_px),
                     "screen_dist_px": float(screen_dist_px),
 
-                    # sx/sy = current - expected in local notch frame.
-                    # correction = expected - current = -sx, -sy.
                     "local_current_minus_expected_dx_px": None if sx is None else float(sx),
                     "local_current_minus_expected_dy_px": None if sy is None else float(sy),
                     "local_correction_dx_px": None if sx is None else float(-sx),

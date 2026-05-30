@@ -64,13 +64,13 @@ def _direction_text_from_correction(corr: dict) -> str:
         v = f"{abs(dy):.2f}{unit} {'DOWN' if dy > 0 else 'UP'}"
 
     if h and v:
-        return f"MOVE {h} / {v}"
+        return f"NEEDED: {h}, {v}"
 
     if h:
-        return f"MOVE {h}"
+        return f"NEEDED: {h}"
 
     if v:
-        return f"MOVE {v}"
+        return f"NEEDED: {v}"
 
     return "CENTERED"
 
@@ -246,6 +246,29 @@ def _draw_fitline_clipped(vis, line, color=(0, 255, 0), thickness=2):
         cv2.line(vis, cp1, cp2, color, int(thickness), lineType=cv2.LINE_AA)
 
 
+def _draw_readable_box_text(vis, text: str, org, *, color=(255, 255, 255), border=(255, 0, 255)):
+    x, y = int(org[0]), int(org[1])
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.55
+    thickness = 1
+
+    (tw, th), base = cv2.getTextSize(str(text), font, scale, thickness)
+
+    pad_x = 10
+    pad_y = 8
+
+    x0 = max(0, x - pad_x)
+    y0 = max(0, y - th - pad_y)
+    x1 = min(vis.shape[1] - 1, x + tw + pad_x)
+    y1 = min(vis.shape[0] - 1, y + base + pad_y)
+
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 0, 0), -1, lineType=cv2.LINE_AA)
+    cv2.rectangle(vis, (x0, y0), (x1, y1), border, 1, lineType=cv2.LINE_AA)
+
+    _put_text(vis, text, (x, y), scale=scale, color=color, thickness=thickness)
+
+
 def _extract_lines_and_anchors(stab_info: dict):
     nf = stab_info.get("notch_frame")
     if not isinstance(nf, dict):
@@ -317,68 +340,12 @@ def _extract_lines_and_anchors(stab_info: dict):
     }
 
 
-def _draw_compact_operator_box(vis, line1: str, line2: str = ""):
-    H, W = vis.shape[:2]
-
-    box_w = min(330, W - 70)
-    box_h = 74 if line2 else 54
-
-    margin_right = 34
-    margin_bottom = 42
-
-    x1 = W - margin_right
-    y1 = H - margin_bottom
-    x0 = x1 - box_w
-    y0 = y1 - box_h
-
-    x0 = max(20, x0)
-    y0 = max(130, y0)
-    x1 = min(W - 20, x1)
-    y1 = min(H - 20, y1)
-
-    cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 0, 0), -1, lineType=cv2.LINE_AA)
-    cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 0, 255), 2, lineType=cv2.LINE_AA)
-    cv2.rectangle(vis, (x0, y0), (x0 + 8, y1), (255, 0, 255), -1)
-
-    def put_centered(text, y, scale, color, thickness):
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        (tw, _th), _base = cv2.getTextSize(str(text), font, scale, thickness)
-        tx = int(round((x0 + x1) * 0.5 - tw * 0.5))
-
-        cv2.putText(
-            vis,
-            str(text),
-            (tx, y),
-            font,
-            scale,
-            (0, 0, 0),
-            thickness + 3,
-            cv2.LINE_AA,
-        )
-        cv2.putText(
-            vis,
-            str(text),
-            (tx, y),
-            font,
-            scale,
-            color,
-            thickness,
-            cv2.LINE_AA,
-        )
-
-    if line2:
-        put_centered(line1, y0 + 30, 0.52, (255, 255, 255), 2)
-        put_centered(line2, y0 + 58, 0.52, (255, 255, 255), 2)
-    else:
-        put_centered(line1, y0 + 36, 0.55, (255, 255, 255), 2)
-
-
 def _draw_expected_center_guidance(vis, stab_info: dict):
     """
     Draws:
       - expected/correct baseplate center target
       - current-to-expected correction arrow
-      - compact bottom-right operator instruction box
+      - readable direction text for operator
     """
     if vis is None or not isinstance(stab_info, dict):
         return
@@ -392,25 +359,25 @@ def _draw_expected_center_guidance(vis, stab_info: dict):
 
     ex, ey = expected_pt
 
-    # Expected/correct center marker.
-    cv2.circle(vis, (ex, ey), 22, (255, 0, 255), 3, lineType=cv2.LINE_AA)
-    cv2.circle(vis, (ex, ey), 13, (255, 255, 0), 2, lineType=cv2.LINE_AA)
+    # Expected/correct center marker: magenta/cyan bullseye.
+    cv2.circle(vis, (ex, ey), 20, (255, 0, 255), 2, lineType=cv2.LINE_AA)
+    cv2.circle(vis, (ex, ey), 12, (255, 255, 0), 2, lineType=cv2.LINE_AA)
 
     cv2.drawMarker(
         vis,
         (ex, ey),
         (255, 0, 255),
         markerType=cv2.MARKER_CROSS,
-        markerSize=42,
-        thickness=3,
+        markerSize=38,
+        thickness=2,
         line_type=cv2.LINE_AA,
     )
 
     _put_text(
         vis,
-        "TARGET",
-        (ex + 16, ey - 18),
-        scale=0.48,
+        "EXPECTED CENTER",
+        (ex + 16, ey - 20),
+        scale=0.52,
         color=(255, 0, 255),
         thickness=1,
     )
@@ -420,52 +387,38 @@ def _draw_expected_center_guidance(vis, stab_info: dict):
 
     cx, cy = current_pt
 
+    # Arrow from current detected center to expected/correct center.
     cv2.arrowedLine(
         vis,
         (cx, cy),
         (ex, ey),
         (255, 0, 255),
-        4,
+        3,
         line_type=cv2.LINE_AA,
-        tipLength=0.25,
+        tipLength=0.22,
     )
 
-    cv2.circle(vis, (cx, cy), 16, (0, 0, 255), 2, lineType=cv2.LINE_AA)
+    # Small current ring so operator sees start of correction vector.
+    cv2.circle(vis, (cx, cy), 15, (0, 0, 255), 2, lineType=cv2.LINE_AA)
 
-    if not isinstance(corr, dict):
+    txt = _direction_text_from_correction(corr)
+    if not txt:
         return
 
-    unit = str(corr.get("unit", "px"))
+    mx = int(round((cx + ex) * 0.5))
+    my = int(round((cy + ey) * 0.5))
 
-    try:
-        dx = float(corr.get("screen_dx", 0.0))
-        dy = float(corr.get("screen_dy", 0.0))
-    except Exception:
-        return
+    # Keep the label on-screen.
+    mx = max(20, min(mx, vis.shape[1] - 480))
+    my = max(65, min(my, vis.shape[0] - 20))
 
-    horizontal = ""
-    vertical = ""
-
-    if abs(dx) >= 0.01:
-        horizontal = f"{abs(dx):.2f}{unit} {'RIGHT' if dx > 0 else 'LEFT'}"
-
-    if abs(dy) >= 0.01:
-        vertical = f"{abs(dy):.2f}{unit} {'DOWN' if dy > 0 else 'UP'}"
-
-    if horizontal and vertical:
-        line1 = f"MOVE {horizontal}"
-        line2 = f"AND {vertical}"
-    elif horizontal:
-        line1 = f"MOVE {horizontal}"
-        line2 = ""
-    elif vertical:
-        line1 = f"MOVE {vertical}"
-        line2 = ""
-    else:
-        line1 = "CENTERED"
-        line2 = ""
-
-    _draw_compact_operator_box(vis, line1, line2)
+    _draw_readable_box_text(
+        vis,
+        txt,
+        (mx, my - 10),
+        color=(255, 255, 255),
+        border=(255, 0, 255),
+    )
 
 
 # ----------------------------
@@ -553,7 +506,7 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
         _draw_fitline_clipped(vis, geom.get("bottom_line"), color=(0, 165, 255), thickness=2)
 
     # ----------------------------
-    # Bottom-frame anchors only
+    # Debug anchors only
     # ----------------------------
     if show_anchors:
         for name, color in (
@@ -563,7 +516,6 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
         ):
             pt = geom.get(name)
             p = _safe_cv_pt(pt)
-
             if p is None:
                 continue
 
@@ -593,7 +545,11 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
             cv2.circle(vis, (x, y), 6, (255, 180, 0), -1, lineType=cv2.LINE_AA)
             _put_text(vis, "side_center@dy", (x + 8, y - 8), scale=0.45, color=(255, 180, 0))
 
-    # Always show target/correction if engine provides it.
+    # ----------------------------
+    # Expected baseplate target + correction arrow
+    # ----------------------------
+    # This is independent from the debug anchor toggle because operators need
+    # this even when raw debug clutter is hidden.
     _draw_expected_center_guidance(vis, stab_info)
 
     # ----------------------------
