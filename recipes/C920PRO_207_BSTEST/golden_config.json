@@ -1,0 +1,124 @@
+{
+    "golden_image_path": "golden.png",
+    "roi": [
+        299,
+        42,
+        657,
+        678
+    ],
+    "expected_center": [
+        328.5577597303901,
+        343.5991796963741
+    ],
+    "expected_angle": -2.5419728504296746,
+    "tolerance_px": {
+        "x": 8.6,
+        "y": 8.6,
+        "angle": 2.0
+    },
+    "registration_roi": [
+        133,
+        270,
+        957,
+        452
+    ],
+    "baseplate_roi": [
+        299,
+        42,
+        657,
+        678
+    ],
+    "inner_border_lines_used": [
+        "left",
+        "right"
+    ],
+    "inner_border_lines": {
+        "left": [
+            0.5172005295753479,
+            0.8558642268180847,
+            256.55835723876953,
+            422.950927734375
+        ],
+        "right": [
+            0.4811543822288513,
+            -0.8766358494758606,
+            962.533203125,
+            460.13255310058594
+        ],
+        "bottom": [
+            0.9999895095825195,
+            0.004580513574182987,
+            597.9765625,
+            678.3217163085938
+        ]
+    },
+    "expected_center_in_baseplate_roi": [
+        107.61544799804688,
+        114.53720092773438
+    ],
+    "baseplate_center_source": "auto",
+    "canny_low": 58,
+    "canny_high": 150,
+    "blur_ksize": 7,
+    "clahe_clip": 1.5,
+    "dilate_iter": 1,
+    "close_iter": 2,
+    "contrast_min": 5.0,
+    "prefer_solid_edge": true,
+    "hysteresis_enabled": true,
+    "baseplate_width_mm": 20.4,
+    "baseplate_height_mm": 26.5,
+    "baseplate_dimensions_mm": {
+        "width": 20.4,
+        "height": 26.5
+    },
+    "notch_blur_ksize": 21,
+    "notch_close_ksize": 11,
+    "notch_open_ksize": 7,
+    "notch_threshold_bias": 1.0,
+    "notch_bottom_band_frac": 0.35,
+    "notch_side_band_frac": 0.35,
+    "notch_frame_roi_extra_pad": 6,
+    "baseplate_roi_extra_pad": 6,
+    "prefer_dark_region": true,
+    "expected_notch_frame": {
+        "coord_model": "bottom_mid_local_frame_abs",
+        "capture_source": "absolute_baseplate_center_in_live_notch_frame",
+        "dx": 4.593704105429451,
+        "dy": 166.7939392783898,
+        "frame_dx": 4.593704105429451,
+        "frame_dy": 166.7939392783898,
+        "sidewall_dx": 4.593704105429451,
+        "sidewall_dy": 166.7939392783898,
+        "relative_angle": -2.123665007424413,
+        "notch_angle": -0.4183078430052614,
+        "baseplate_center_abs": [
+            627.5577597303901,
+            385.5991796963741
+        ],
+        "live_roi_at_capture": [
+            299,
+            42,
+            657,
+            678
+        ]
+    },
+    "px_per_mm": 3.7661853455809196,
+    "mm_per_px": 0.2655206550504364,
+    "baseplate_px_per_mm": 3.7661853455809196,
+    "baseplate_scale": {
+        "px_per_mm": 3.7661853455809196,
+        "mm_per_px": 0.2655206550504364,
+        "baseplate_width_mm": 20.4,
+        "baseplate_height_mm": 26.5,
+        "baseplate_dimensions_mm": {
+            "width": 20.4,
+            "height": 26.5
+        }
+    },
+    "tolerance_mm": {
+        "x": 2.0,
+        "y": 2.0,
+        "angle": 2.0
+    }
+}
