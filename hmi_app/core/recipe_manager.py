@@ -22,6 +22,13 @@ def _find_golden_image_in_dir(recipe_dir: str) -> Optional[str]:
     return None
 
 
+def _load_image(path: Optional[str]):
+    """Return an image only when the candidate path is readable by OpenCV."""
+    if not path or not os.path.isfile(path):
+        return None
+    return cv2.imread(path)
+
+
 class RecipeManager:
     """
     Flat product/recipe manager.
@@ -69,6 +76,12 @@ class RecipeManager:
                 continue
 
             if os.path.isfile(os.path.join(recipe_dir, "golden_config.json")):
+                try:
+                    self.load(name)
+                except Exception:
+                    # A config without a usable golden image is an incomplete
+                    # product, not a runnable item for the operator dropdown.
+                    continue
                 out.append(name)
                 continue
 
@@ -78,6 +91,10 @@ class RecipeManager:
                 for cfg_name in sorted(os.listdir(configs_dir)):
                     cfg_dir = os.path.join(configs_dir, cfg_name)
                     if os.path.isdir(cfg_dir) and os.path.isfile(os.path.join(cfg_dir, "golden_config.json")):
+                        try:
+                            self.load(name, config_name=cfg_name)
+                        except Exception:
+                            continue
                         out.append(name)
                         break
 
@@ -151,18 +168,30 @@ class RecipeManager:
         cfg_path = os.path.join(config_dir, "golden_config.json")
         cfg = _safe_load_json(cfg_path)
 
-        golden_path = cfg.get("golden_image_path")
-        if golden_path:
-            if not os.path.isabs(golden_path):
-                golden_path = os.path.normpath(os.path.join(config_dir, golden_path))
-        else:
-            golden_path = _find_golden_image_in_dir(config_dir)
-            if not golden_path:
-                raise ValueError(f"golden_image_path missing and no golden image found in {config_dir}")
+        configured_path = cfg.get("golden_image_path")
+        golden_path = configured_path
+        if golden_path and not os.path.isabs(golden_path):
+            golden_path = os.path.normpath(os.path.join(config_dir, golden_path))
 
-        golden = cv2.imread(golden_path)
+        golden = _load_image(golden_path)
+
+        # A recipe folder is self-contained.  If a config has a stale extension
+        # (for example, golden.png was renamed to golden.jpg), use the actual
+        # local golden image instead of dropping the entire product at startup.
+        # We deliberately do not rewrite the JSON while merely loading it.
         if golden is None:
-            raise FileNotFoundError(f"Could not load golden image: {golden_path}")
+            fallback_path = _find_golden_image_in_dir(config_dir)
+            fallback = _load_image(fallback_path)
+            if fallback is not None:
+                golden_path = fallback_path
+                golden = fallback
+
+        if golden is None:
+            requested = configured_path or "<not configured>"
+            raise FileNotFoundError(
+                f"Could not load golden image for {recipe_name}. "
+                f"Configured: {requested}; searched: {config_dir}"
+            )
 
         return Recipe(
             name=recipe_name,

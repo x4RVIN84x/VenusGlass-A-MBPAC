@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
-from hmi_app.core.engine import QCPreviewEngine
+from hmi_app.core.engine import QCPreviewEngine, get_configured_tolerances
 from hmi_app.core.recipe_manager import RecipeManager
 
 
@@ -243,6 +243,7 @@ class CalibrationPage(QWidget):
         self._build_product_group()
         self._build_preview_group()
         self._build_baseplate_tuning_group()
+        self._build_tolerance_group()
         self._build_notch_tuning_group()
         self._build_save_group()
 
@@ -537,6 +538,79 @@ class CalibrationPage(QWidget):
 
         self.controls_layout.addWidget(gb)
 
+    def _build_tolerance_group(self):
+        gb = QGroupBox("Acceptance Tolerances")
+        gb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        vb = QVBoxLayout(gb)
+        vb.setSpacing(6)
+
+        hint = QLabel("PASS limits for this product. They are saved in mm and degrees.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("font-size: 12px; font-weight: 800; color: #aeb3c2;")
+        vb.addWidget(hint)
+
+        self.sp_tol_x_mm = QDoubleSpinBox()
+        self.sp_tol_x_mm.setRange(0.01, 50.0)
+        self.sp_tol_x_mm.setSingleStep(0.05)
+        self.sp_tol_x_mm.setDecimals(3)
+        self.sp_tol_x_mm.setSuffix(" mm")
+        _add_param(
+            vb,
+            "X tolerance",
+            self.sp_tol_x_mm,
+            _tip_html(
+                title="Allowed X movement in millimeters",
+                what="The product still passes when its X offset from the captured golden position is within this distance.",
+                increase="Allows more left/right movement before the part fails.",
+                decrease="Makes X placement stricter.",
+                typical="Start with the engineering tolerance for this product, for example 0.25 to 1.00 mm.",
+                step="Use the actual allowed manufacturing tolerance; do not tune this from noisy camera pixels.",
+                warning="This is an acceptance limit, not a detector tuning control.",
+            ),
+        )
+
+        self.sp_tol_y_mm = QDoubleSpinBox()
+        self.sp_tol_y_mm.setRange(0.01, 50.0)
+        self.sp_tol_y_mm.setSingleStep(0.05)
+        self.sp_tol_y_mm.setDecimals(3)
+        self.sp_tol_y_mm.setSuffix(" mm")
+        _add_param(
+            vb,
+            "Y tolerance",
+            self.sp_tol_y_mm,
+            _tip_html(
+                title="Allowed Y movement in millimeters",
+                what="The product still passes when its Y offset from the captured golden position is within this distance.",
+                increase="Allows more up/down movement before the part fails.",
+                decrease="Makes Y placement stricter.",
+                typical="Start with the engineering tolerance for this product, for example 0.25 to 1.00 mm.",
+                step="Use the actual allowed manufacturing tolerance; do not tune this from noisy camera pixels.",
+                warning="This is an acceptance limit, not a detector tuning control.",
+            ),
+        )
+
+        self.sp_tol_angle_deg = QDoubleSpinBox()
+        self.sp_tol_angle_deg.setRange(0.1, 45.0)
+        self.sp_tol_angle_deg.setSingleStep(0.1)
+        self.sp_tol_angle_deg.setDecimals(2)
+        self.sp_tol_angle_deg.setSuffix(" degrees")
+        _add_param(
+            vb,
+            "Angle tolerance",
+            self.sp_tol_angle_deg,
+            _tip_html(
+                title="Allowed rotation in degrees",
+                what="The product still passes when its measured rotation from the captured golden position is within this angle.",
+                increase="Allows more angular rotation before the part fails.",
+                decrease="Makes angular alignment stricter.",
+                typical="Use the product drawing's angular tolerance; a common starting point is 1 to 5 degrees.",
+                step="Change by 0.1 degree when the engineering requirement calls for it.",
+                warning="This is evaluated independently from the X and Y millimeter limits.",
+            ),
+        )
+
+        self.controls_layout.addWidget(gb)
+
     def _build_notch_tuning_group(self):
         gb = QGroupBox("Notch / Glass Edge Tuning")
         gb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
@@ -702,6 +776,9 @@ class CalibrationPage(QWidget):
         widgets = [
             self.sp_baseplate_w_mm,
             self.sp_baseplate_h_mm,
+            self.sp_tol_x_mm,
+            self.sp_tol_y_mm,
+            self.sp_tol_angle_deg,
             self.sp_canny_low,
             self.sp_canny_high,
             self.sp_blur,
@@ -934,7 +1011,15 @@ class CalibrationPage(QWidget):
 
         cfg.setdefault("expected_center", [50.0, 50.0])
         cfg.setdefault("expected_angle", 0.0)
-        cfg.setdefault("tolerance_px", {"x": 10, "y": 10, "angle": 5})
+
+        if not isinstance(cfg.get("tolerance"), dict):
+            legacy_tolerance = get_configured_tolerances(cfg)
+            cfg["tolerance"] = {
+                "x_mm": float(legacy_tolerance.get("x_mm") or 1.0),
+                "y_mm": float(legacy_tolerance.get("y_mm") or 1.0),
+                "angle_deg": float(legacy_tolerance.get("angle_deg") or 5.0),
+            }
+        cfg.pop("tolerance_px", None)
 
         cfg.setdefault("baseplate_width_mm", 20.4)
         cfg.setdefault("baseplate_height_mm", 26.5)
@@ -1060,6 +1145,15 @@ class CalibrationPage(QWidget):
             cfg.setdefault("baseplate_height_mm", 26.5)
             cfg.setdefault("baseplate_dimensions_mm", {"width": 20.4, "height": 26.5})
 
+            if not isinstance(cfg.get("tolerance"), dict):
+                legacy_tolerance = get_configured_tolerances(cfg)
+                cfg["tolerance"] = {
+                    "x_mm": float(legacy_tolerance.get("x_mm") or 1.0),
+                    "y_mm": float(legacy_tolerance.get("y_mm") or 1.0),
+                    "angle_deg": float(legacy_tolerance.get("angle_deg") or 5.0),
+                }
+            cfg.pop("tolerance_px", None)
+
             _safe_write_json(str(cfg_path), cfg)
 
             if not (dst / "golden.png").is_file():
@@ -1126,6 +1220,15 @@ class CalibrationPage(QWidget):
         cfg["notch_frame_roi_extra_pad"] = int(self.sp_roi_extra_pad.value())
         cfg["baseplate_roi_extra_pad"] = int(self.sp_roi_extra_pad.value())
 
+        cfg["tolerance"] = {
+            "x_mm": float(self.sp_tol_x_mm.value()),
+            "y_mm": float(self.sp_tol_y_mm.value()),
+            "angle_deg": float(self.sp_tol_angle_deg.value()),
+        }
+        # Once a recipe is saved from the Calibration page, its acceptance
+        # limits have a physical unit and no longer need the legacy pixel block.
+        cfg.pop("tolerance_px", None)
+
         cfg["golden_image_path"] = "golden.png"
         cfg.setdefault("prefer_solid_edge", True)
         cfg.setdefault("prefer_dark_region", True)
@@ -1160,6 +1263,11 @@ class CalibrationPage(QWidget):
             bw, bh = self._get_cfg_baseplate_dims(cfg)
             self.sp_baseplate_w_mm.setValue(float(bw))
             self.sp_baseplate_h_mm.setValue(float(bh))
+
+            tolerance = get_configured_tolerances(cfg)
+            self.sp_tol_x_mm.setValue(float(tolerance.get("x_mm") or 1.0))
+            self.sp_tol_y_mm.setValue(float(tolerance.get("y_mm") or 1.0))
+            self.sp_tol_angle_deg.setValue(float(tolerance.get("angle_deg") or 5.0))
 
             self.sp_canny_low.setValue(int(cfg.get("canny_low", 58)))
             self.sp_canny_high.setValue(int(cfg.get("canny_high", 150)))
@@ -1349,131 +1457,6 @@ class CalibrationPage(QWidget):
         except Exception:
             return self._last_engine_out
 
-
-    # -------------------------
-    # Expected notch-frame capture helpers
-    # -------------------------
-    def _angle_diff_deg(self, a, b) -> float:
-        d = float(a) - float(b)
-
-        while d > 180.0:
-            d -= 360.0
-
-        while d < -180.0:
-            d += 360.0
-
-        return float(d)
-
-    def _get_live_notch_frame_from_stab(self, stab_info: dict):
-        # Return the live notch/bottom coordinate frame used by the rebuilt stabilizer.
-        # The frame must contain origin + x_axis + y_axis.
-        if not isinstance(stab_info, dict):
-            return None
-
-        for key in (
-            "notch_frame",
-            "notch_frame_runtime",
-            "current_notch_frame",
-            "current_bottom_frame",
-        ):
-            frame = stab_info.get(key)
-
-            if isinstance(frame, dict):
-                if "origin" in frame and "x_axis" in frame and "y_axis" in frame:
-                    return frame
-
-        for dbg_key in (
-            "current_dark_debug",
-            "solid_edge_debug",
-            "current_lines_debug",
-            "legacy_lines_debug",
-        ):
-            dbg = stab_info.get(dbg_key)
-
-            if isinstance(dbg, dict):
-                for key in ("notch_frame", "current_notch_frame", "current_bottom_frame"):
-                    frame = dbg.get(key)
-
-                    if isinstance(frame, dict):
-                        if "origin" in frame and "x_axis" in frame and "y_axis" in frame:
-                            return frame
-
-        return None
-
-    def _point_to_live_notch_frame(self, point_abs, frame):
-        # Convert absolute image coordinates into live notch-frame local coordinates.
-        # This is the value that must be saved as expected_notch_frame dx/dy.
-        if point_abs is None or not isinstance(frame, dict):
-            return None
-
-        try:
-            p = np.asarray(point_abs, dtype=np.float64).reshape(2)
-            o = np.asarray(frame["origin"], dtype=np.float64).reshape(2)
-            x_axis = np.asarray(frame["x_axis"], dtype=np.float64).reshape(2)
-            y_axis = np.asarray(frame["y_axis"], dtype=np.float64).reshape(2)
-        except Exception:
-            return None
-
-        nx = float(np.linalg.norm(x_axis))
-        ny = float(np.linalg.norm(y_axis))
-
-        if not np.isfinite(nx) or not np.isfinite(ny) or nx < 1e-9 or ny < 1e-9:
-            return None
-
-        x_axis = x_axis / nx
-        y_axis = y_axis / ny
-
-        d = p - o
-
-        if not np.isfinite(d).all():
-            return None
-
-        return float(np.dot(d, x_axis)), float(np.dot(d, y_axis))
-
-    def _notch_frame_angle_deg(self, frame) -> float:
-        # Angle of the notch frame x-axis / bottom reference line.
-        if not isinstance(frame, dict):
-            return 0.0
-
-        for key in ("angle_deg", "notch_angle", "bottom_angle", "bottom_angle_deg"):
-            try:
-                v = float(frame.get(key))
-                if np.isfinite(v):
-                    return v
-            except Exception:
-                pass
-
-        try:
-            x_axis = np.asarray(frame["x_axis"], dtype=np.float64).reshape(2)
-            return float(np.degrees(np.arctan2(float(x_axis[1]), float(x_axis[0]))))
-        except Exception:
-            pass
-
-        for key in ("bottom_line", "line_bottom"):
-            bottom_line = frame.get(key)
-
-            try:
-                vx, vy, _x0, _y0 = map(float, bottom_line)
-                return float(np.degrees(np.arctan2(vy, vx)))
-            except Exception:
-                pass
-
-        return 0.0
-
-    def _force_one_clean_stabilizer_tick(self):
-        # Capture should not use a stale stabilizer result from the previous JSON.
-        # Resetting frame_i forces process_frame() to run the stabilizer on the current frame.
-        try:
-            self.engine._stab_info = None
-        except Exception:
-            pass
-
-        try:
-            self.engine._frame_i = 0
-        except Exception:
-            pass
-
-
     # -------------------------
     # Capture / save
     # -------------------------
@@ -1493,11 +1476,6 @@ class CalibrationPage(QWidget):
         cfg = dict(recipe.cfg)
         cfg = self._cfg_with_current_tuning(cfg)
 
-        # Keep the notch/glass registration ROI before saving the live baseplate ROI.
-        old_registration_roi = cfg.get("registration_roi", None)
-        old_roi = cfg.get("roi", None)
-
-        self._force_one_clean_stabilizer_tick()
         out = self._force_live_engine_output_with_cfg(cfg)
 
         if out is None:
@@ -1509,64 +1487,32 @@ class CalibrationPage(QWidget):
             self.lbl_cfg_status.setText("Status: CAPTURE FAIL: no stab_info")
             return
 
+        current_measure = stab_info.get("current_notch_measure")
+        if not isinstance(current_measure, dict):
+            self.lbl_cfg_status.setText("Status: CAPTURE FAIL: no current_notch_measure")
+            return
+
         center_rel = getattr(out, "center_rel", None)
         angle = getattr(out, "angle", None)
         roi_live = getattr(out, "roi_live", None)
 
-        if center_rel is None or angle is None or roi_live is None:
+        if center_rel is None or angle is None:
             self.lbl_cfg_status.setText("Status: CAPTURE FAIL: baseplate missing in live output")
             return
 
-        try:
-            rx, ry, _rw, _rh = map(float, roi_live)
-            center_abs = (
-                float(rx + float(center_rel[0])),
-                float(ry + float(center_rel[1])),
-            )
-        except Exception:
-            self.lbl_cfg_status.setText("Status: CAPTURE FAIL: bad center/ROI")
-            return
-
-        live_frame = self._get_live_notch_frame_from_stab(stab_info)
-
-        if live_frame is None:
-            self.lbl_cfg_status.setText("Status: CAPTURE FAIL: no live notch frame")
-            return
-
-        local_xy = self._point_to_live_notch_frame(center_abs, live_frame)
-
-        if local_xy is None:
-            self.lbl_cfg_status.setText("Status: CAPTURE FAIL: cannot project baseplate into notch frame")
-            return
-
-        frame_dx, frame_dy = local_xy
-        notch_angle = self._notch_frame_angle_deg(live_frame)
-        relative_angle = self._angle_diff_deg(float(angle), float(notch_angle))
+        frame_dx = float(current_measure.get("frame_dx", current_measure.get("dx", 0.0)))
+        frame_dy = float(current_measure.get("frame_dy", current_measure.get("dy", 0.0)))
 
         cfg["expected_notch_frame"] = {
-            "coord_model": "bottom_mid_local_frame_abs",
-            "capture_source": "absolute_baseplate_center_in_live_notch_frame",
-
-            # Main engine fields
-            "dx": float(frame_dx),
-            "dy": float(frame_dy),
-            "frame_dx": float(frame_dx),
-            "frame_dy": float(frame_dy),
-
-            # Compatibility aliases for recovered modules
-            "sidewall_dx": float(frame_dx),
-            "sidewall_dy": float(frame_dy),
-
-            # Angle target
-            "relative_angle": float(relative_angle),
-            "notch_angle": float(notch_angle),
-
-            # Debug values for proving what capture saved
-            "baseplate_center_abs": [
-                float(center_abs[0]),
-                float(center_abs[1]),
-            ],
-            "live_roi_at_capture": [int(round(v)) for v in roi_live],
+            "coord_model": "bottom_mid_local_frame",
+            "dx": frame_dx,
+            "dy": frame_dy,
+            "frame_dx": frame_dx,
+            "frame_dy": frame_dy,
+            "sidewall_dx": float(current_measure.get("sidewall_dx", frame_dx)),
+            "sidewall_dy": float(current_measure.get("sidewall_dy", frame_dy)),
+            "relative_angle": float(current_measure.get("relative_angle", 0.0)),
+            "notch_angle": float(current_measure.get("notch_angle", 0.0)),
         }
 
         cfg["expected_center"] = [
@@ -1575,19 +1521,9 @@ class CalibrationPage(QWidget):
         ]
         cfg["expected_angle"] = float(angle)
 
-        # Save the live baseplate detector ROI separately.
-        # Keep cfg["roi"] too because some recovered engine versions still read it.
-        live_roi_int = [int(round(v)) for v in roi_live]
-        cfg["baseplate_roi"] = list(live_roi_int)
-        cfg["roi"] = list(live_roi_int)
-
-        # Do not overwrite the glass/notch registration ROI with the tiny baseplate ROI.
-        if old_registration_roi is not None:
-            cfg["registration_roi"] = old_registration_roi
-        elif old_roi is not None:
-            cfg["registration_roi"] = old_roi
-        else:
-            cfg["registration_roi"] = list(live_roi_int)
+        if roi_live is not None:
+            cfg["roi"] = [int(v) for v in roi_live]
+            cfg.setdefault("registration_roi", cfg["roi"])
 
         cfg["golden_image_path"] = "golden.png"
 
@@ -1610,28 +1546,22 @@ class CalibrationPage(QWidget):
             self._load_tuning_from_cfg()
             self._update_expected_label()
 
-            # Force one immediate process with the new expected values so dx/dy reset without waiting.
-            try:
-                self._force_one_clean_stabilizer_tick()
-                self._last_engine_out = self.engine.process_frame(self._last_frame_bgr)
-            except Exception:
-                pass
+            enf = cfg["expected_notch_frame"]
 
             if scale is not None and "px_per_mm" in cfg:
                 scale_txt = f" scale={float(cfg['px_per_mm']):.3f}px/mm"
             else:
-                scale_txt = " scale=kept/unchanged"
+                scale_txt = " scale=NOT SAVED"
 
             self.lbl_cfg_status.setText(
-                "Status: GOLDEN + EXPECTED SAVED ABS-NOTCH  "
-                f"dx={frame_dx:.1f}px dy={frame_dy:.1f}px "
-                f"relTheta={relative_angle:.1f}"
+                "Status: GOLDEN + EXPECTED SAVED  "
+                f"dx={enf['dx']:.1f}px dy={enf['dy']:.1f}px "
+                f"relTheta={enf['relative_angle']:.1f}"
                 f"{scale_txt}"
             )
 
         except Exception as e:
             self.lbl_cfg_status.setText(f"Status: SAVED IMAGE, JSON FAIL: {e}")
-
 
     def save_product_json(self):
         if self.engine.recipe is None:

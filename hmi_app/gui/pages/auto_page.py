@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
-from hmi_app.core.engine import QCPreviewEngine
+from hmi_app.core.engine import QCPreviewEngine, get_configured_tolerances
 
 
 class AutoPage(QWidget):
@@ -155,6 +155,19 @@ class AutoPage(QWidget):
         self.sld_pad.setValue(120)
         vb.addWidget(self.sld_pad)
 
+        # Kept directly above the changing status so the operator can always
+        # see the active PASS limits without digging into Calibration.
+        self.lbl_tolerance = QLabel("Limits: —")
+        self.lbl_tolerance.setStyleSheet(
+            "font-size: 11px; font-weight: 900; color: #cbd9ff; "
+            "background: #171b25; border: 1px solid #2f3a54; "
+            "border-radius: 5px; padding: 3px 6px;"
+        )
+        self.lbl_tolerance.setWordWrap(False)
+        self.lbl_tolerance.setFixedHeight(26)
+        self.lbl_tolerance.setToolTip("Acceptance limits saved for the active product.")
+        vb.addWidget(self.lbl_tolerance)
+
         self.lbl_status = QLabel("Status: IDLE")
         self.lbl_status.setStyleSheet("font-size: 14px; font-weight: 800;")
         self.lbl_status.setWordWrap(False)
@@ -176,6 +189,7 @@ class AutoPage(QWidget):
 
         self._last_zoom_crop = None
         self._update_zoom_label()
+        self._update_tolerance_label()
 
     def _set_status(self, text: str):
         fm = QFontMetrics(self.lbl_status.font())
@@ -184,6 +198,30 @@ class AutoPage(QWidget):
     def _update_zoom_label(self):
         z = float(self.sld_zoom.value()) / 100.0
         self.lbl_zoom.setText(f"Display zoom: {z:.2f}x")
+
+    def _update_tolerance_label(self):
+        recipe = getattr(self.engine, "recipe", None)
+        if recipe is None:
+            self.lbl_tolerance.setText("Limits: no product loaded")
+            return
+
+        tolerance = get_configured_tolerances(getattr(recipe, "cfg", {}))
+        x_mm = tolerance.get("x_mm")
+        y_mm = tolerance.get("y_mm")
+        angle_deg = tolerance.get("angle_deg")
+
+        if x_mm is not None and y_mm is not None:
+            self.lbl_tolerance.setText(
+                f"LIMITS  X +/- {float(x_mm):.3f} mm | "
+                f"Y +/- {float(y_mm):.3f} mm | "
+                f"ang +/- {float(angle_deg):.2f} deg"
+            )
+            return
+
+        # Only uncalibrated, pre-v1.5.4.2 recipes can reach this path.
+        self.lbl_tolerance.setText(
+            f"LIMITS  X/Y need calibration scale | ang +/- {float(angle_deg):.2f} deg"
+        )
 
     def _set_engine_settings_from_ui(self):
         self.engine.settings.stab_every_n = int(self.sld_stab_n.value())
@@ -690,6 +728,7 @@ class AutoPage(QWidget):
 
         self._running = True
         self._reset_alarm_state()
+        self._update_tolerance_label()
 
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -712,6 +751,7 @@ class AutoPage(QWidget):
         self._set_status("Status: STOPPED")
 
     def on_tick(self):
+        self._update_tolerance_label()
         ok, frame = self.cam.read()
 
         if not ok or frame is None:

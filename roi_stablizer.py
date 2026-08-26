@@ -656,7 +656,17 @@ def _detect_dark_notch(
     open_ksize=7,
     threshold_bias=1.0,
 ):
-    return detector.detect_notch_dark_region_frame_local(
+    detect_dark_region = getattr(detector, "detect_notch_dark_region_frame_local", None)
+    if not callable(detect_dark_region):
+        # Recovered branches can contain the legacy stabilizer beside a newer
+        # detector module.  Treat the unavailable optional path as a normal
+        # miss so the proven line-based fallback below can still stabilize.
+        return {
+            "ok": False,
+            "reason": "dark_region_detector_unavailable",
+        }
+
+    return detect_dark_region(
         image,
         roi,
         blur_ksize=_odd_int(blur_ksize, minimum=3),

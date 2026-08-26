@@ -135,6 +135,82 @@ def _saved_px_per_mm(cfg: Dict[str, Any]):
     return None
 
 
+def _effective_px_per_mm(cfg: Dict[str, Any], frame_scale_info=None):
+    """Return the saved scale first, falling back to the current frame scale."""
+    px_per_mm = _saved_px_per_mm(cfg)
+
+    if px_per_mm is None and isinstance(frame_scale_info, dict):
+        px_per_mm = _safe_float(frame_scale_info.get("px_per_mm"), None)
+
+    if px_per_mm is not None and px_per_mm > 0:
+        return float(px_per_mm)
+
+    return None
+
+
+def get_configured_tolerances(cfg: Dict[str, Any], frame_scale_info=None) -> Dict[str, Any]:
+    """Resolve a product's acceptance limits for display and runtime checks.
+
+    New product JSON stores a physical tolerance block::
+
+        {"tolerance": {"x_mm": 1.0, "y_mm": 1.0, "angle_deg": 5.0}}
+
+    ``tolerance_px`` is kept as a read-only compatibility path for products made
+    before physical limits were configurable.  It is converted when a calibrated
+    scale is available, and remains pixel-gated only when an old product has no
+    scale at all.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    px_per_mm = _effective_px_per_mm(cfg, frame_scale_info)
+
+    physical = cfg.get("tolerance")
+    if isinstance(physical, dict):
+        x_mm = _safe_float(physical.get("x_mm"), None)
+        y_mm = _safe_float(physical.get("y_mm"), None)
+        angle_deg = _safe_float(physical.get("angle_deg"), None)
+
+        if (
+            x_mm is not None and x_mm > 0
+            and y_mm is not None and y_mm > 0
+            and angle_deg is not None and angle_deg > 0
+        ):
+            return {
+                "x_mm": float(x_mm),
+                "y_mm": float(y_mm),
+                "angle_deg": float(angle_deg),
+                "x_px": None,
+                "y_px": None,
+                "px_per_mm": px_per_mm,
+                "source": "mm_deg",
+                "requires_scale": True,
+            }
+
+    # Compatibility with existing recipe JSON.  These values are intentionally
+    # not written back by the Calibration page; saving migrates a recipe to the
+    # physical tolerance block above.
+    legacy = cfg.get("tolerance_px")
+    legacy = legacy if isinstance(legacy, dict) else {}
+
+    x_px = _safe_float(legacy.get("x"), 10.0)
+    y_px = _safe_float(legacy.get("y"), 10.0)
+    angle_deg = _safe_float(legacy.get("angle"), 5.0)
+
+    x_px = float(x_px) if x_px is not None and x_px > 0 else 10.0
+    y_px = float(y_px) if y_px is not None and y_px > 0 else 10.0
+    angle_deg = float(angle_deg) if angle_deg is not None and angle_deg > 0 else 5.0
+
+    return {
+        "x_mm": None if px_per_mm is None else float(x_px / px_per_mm),
+        "y_mm": None if px_per_mm is None else float(y_px / px_per_mm),
+        "angle_deg": float(angle_deg),
+        "x_px": float(x_px),
+        "y_px": float(y_px),
+        "px_per_mm": px_per_mm,
+        "source": "legacy_px" if px_per_mm is None else "legacy_px_converted",
+        "requires_scale": False,
+    }
+
+
 def _estimate_px_per_mm_from_contour(contour_rel, cfg: Dict[str, Any]):
     if contour_rel is None or not isinstance(cfg, dict):
         return None
@@ -189,10 +265,7 @@ def _estimate_px_per_mm_from_contour(contour_rel, cfg: Dict[str, Any]):
 
 
 def _px_to_display(dx_px, dy_px, cfg, frame_scale_info=None):
-    px_per_mm = _saved_px_per_mm(cfg)
-
-    if px_per_mm is None and isinstance(frame_scale_info, dict):
-        px_per_mm = _safe_float(frame_scale_info.get("px_per_mm"), None)
+    px_per_mm = _effective_px_per_mm(cfg, frame_scale_info)
 
     if px_per_mm is not None and px_per_mm > 0:
         return {
@@ -701,29 +774,37 @@ class QCPreviewEngine:
             and self.settings.stab_every_n > 0
             and (self._frame_i % int(self.settings.stab_every_n) == 0)
         ):
-            moved, info = roi_stablizer.stabilize_rois_using_saved_inner_border_lines(
-                current_img=raw,
-                golden_img=golden,
-                registration_roi_golden=registration_roi_golden,
-                golden_inner_lines_abs=golden_lines,
-                rois_golden=[roi_cfg],
-                search_padding_px=int(self.settings.search_padding_px),
+            try:
+                moved, info = roi_stablizer.stabilize_rois_using_saved_inner_border_lines(
+                    current_img=raw,
+                    golden_img=golden,
+                    registration_roi_golden=registration_roi_golden,
+                    golden_inner_lines_abs=golden_lines,
+                    rois_golden=[roi_cfg],
+                    search_padding_px=int(self.settings.search_padding_px),
 
-                canny_low=int(cfg.get("canny_low", 60)),
-                canny_high=int(cfg.get("canny_high", 140)),
+                    canny_low=int(cfg.get("canny_low", 60)),
+                    canny_high=int(cfg.get("canny_high", 140)),
 
-                prefer_dark_region=bool(cfg.get("prefer_dark_region", True)),
-                prefer_solid_edge=bool(cfg.get("prefer_solid_edge", True)),
+                    prefer_dark_region=bool(cfg.get("prefer_dark_region", True)),
+                    prefer_solid_edge=bool(cfg.get("prefer_solid_edge", True)),
 
-                notch_blur_ksize=int(cfg.get("notch_blur_ksize", 5)),
-                notch_close_ksize=int(cfg.get("notch_close_ksize", 2)),
-                notch_open_ksize=int(cfg.get("notch_open_ksize", 0)),
-                notch_threshold_bias=float(cfg.get("notch_threshold_bias", 0.0)),
-                notch_bottom_band_frac=float(cfg.get("notch_bottom_band_frac", 0.35)),
-                notch_side_band_frac=float(cfg.get("notch_side_band_frac", 0.35)),
+                    notch_blur_ksize=int(cfg.get("notch_blur_ksize", 5)),
+                    notch_close_ksize=int(cfg.get("notch_close_ksize", 2)),
+                    notch_open_ksize=int(cfg.get("notch_open_ksize", 0)),
+                    notch_threshold_bias=float(cfg.get("notch_threshold_bias", 0.0)),
+                    notch_bottom_band_frac=float(cfg.get("notch_bottom_band_frac", 0.35)),
+                    notch_side_band_frac=float(cfg.get("notch_side_band_frac", 0.35)),
 
-                hysteresis_enabled=bool(cfg.get("hysteresis_enabled", True)),
-            )
+                    hysteresis_enabled=bool(cfg.get("hysteresis_enabled", True)),
+                )
+            except Exception as exc:
+                moved = None
+                info = {
+                    "ok": False,
+                    "reason": "stabilizer_exception",
+                    "error": str(exc),
+                }
 
             self._stab_info = info if isinstance(info, dict) else {}
 
@@ -852,11 +933,8 @@ class QCPreviewEngine:
         # ----------------------------
         golden_center = tuple(cfg.get("expected_center", (0.0, 0.0)))
         golden_angle = float(cfg.get("expected_angle", 0.0))
-        tol = cfg.get("tolerance_px", {"x": 10, "y": 10, "angle": 5})
-
-        tol_x = float(tol.get("x", 10))
-        tol_y = float(tol.get("y", 10))
-        tol_a = float(tol.get("angle", 5))
+        active_tolerance = get_configured_tolerances(cfg, frame_scale_info)
+        tol_a = float(active_tolerance["angle_deg"])
 
         state = "SEARCH"
         text = "SEARCHING"
@@ -927,7 +1005,32 @@ class QCPreviewEngine:
                 dy_px = abs(float(sy))
                 dtheta = abs(float(stheta))
 
-            ok_all = (dx_px <= tol_x) and (dy_px <= tol_y) and (dtheta <= tol_a)
+            # New recipes are always evaluated in real-world units.  Older
+            # pixel recipes still work until they are opened and saved in
+            # Calibration, which writes the physical tolerance block.
+            gate_scale = active_tolerance.get("px_per_mm")
+            tol_x_mm = active_tolerance.get("x_mm")
+            tol_y_mm = active_tolerance.get("y_mm")
+            tol_x_px = active_tolerance.get("x_px")
+            tol_y_px = active_tolerance.get("y_px")
+
+            gate_unit = None
+            if gate_scale is not None and tol_x_mm is not None and tol_y_mm is not None:
+                gate_dx = float(dx_px) / float(gate_scale)
+                gate_dy = float(dy_px) / float(gate_scale)
+                position_ok = gate_dx <= float(tol_x_mm) and gate_dy <= float(tol_y_mm)
+                gate_unit = "mm"
+            elif tol_x_px is not None and tol_y_px is not None:
+                gate_dx = float(dx_px)
+                gate_dy = float(dy_px)
+                position_ok = gate_dx <= float(tol_x_px) and gate_dy <= float(tol_y_px)
+                gate_unit = "px"
+            else:
+                # A physical tolerance without a usable calibration scale must
+                # never silently fall back to an arbitrary pixel limit.
+                position_ok = False
+
+            ok_all = position_ok and (dtheta <= tol_a)
 
             if ok_all:
                 self._stable_have = min(int(self.settings.stable_need), self._stable_have + 1)
@@ -937,7 +1040,13 @@ class QCPreviewEngine:
             disp_abs = _px_to_display(dx_px, dy_px, cfg, frame_scale_info)
             unit = disp_abs["unit"]
 
-            if ok_all and self._stable_have >= int(self.settings.stable_need):
+            if gate_unit is None:
+                state = "TRACK"
+                text = (
+                    f"TRACK {self._stable_have}/{int(self.settings.stable_need)}  "
+                    "CALIBRATION SCALE REQUIRED FOR mm LIMITS"
+                )
+            elif ok_all and self._stable_have >= int(self.settings.stable_need):
                 state = "PASS"
                 text = f"PASS  dx={disp_abs['dx']:.2f}{unit} dy={disp_abs['dy']:.2f}{unit} dTheta={dtheta:.1f}"
             else:
@@ -949,6 +1058,8 @@ class QCPreviewEngine:
         # ----------------------------
         if not isinstance(self._stab_info, dict):
             self._stab_info = {}
+
+        self._stab_info["active_tolerance"] = dict(active_tolerance)
 
         if center_abs is not None:
             self._stab_info["current_baseplate_center_abs"] = [

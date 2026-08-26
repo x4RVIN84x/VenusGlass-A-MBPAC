@@ -27,6 +27,12 @@ output/
 *.zip
 *.7z
 
+# Product definitions must remain self-contained after a clone.  Golden images
+# are calibration assets, not disposable camera captures.
+!recipes/**/*.jpg
+!recipes/**/*.jpeg
+!recipes/**/*.png
+
 !recipes/**/*.jpg
 !recipes/**/*.jpeg
 !recipes/**/*.png
