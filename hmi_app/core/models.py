@@ -58,6 +58,10 @@ class EngineSettings:
     show_legacy_debug: bool = False
     show_stabilizer_text: bool = True
 
+    # Auto Mode redraws operator guidance after display zoom so it stays on
+    # screen exactly once. Other pages keep the engine-side HUD.
+    defer_operator_hud: bool = False
+
     # Older/legacy overlay toggle names.
     # Keep these so old pages/modules do not crash.
     show_stab_search_roi: bool = True
@@ -102,6 +106,7 @@ class QCFrameOutput:
     status_text: str = ""
     state: str = "FAIL"
     roi_live: Tuple[int, int, int, int] = (0, 0, 1, 1)
+    captured_at: str = ""
 
     stab_info: Optional[Dict[str, Any]] = None
     center_rel: Optional[Tuple[float, float]] = None

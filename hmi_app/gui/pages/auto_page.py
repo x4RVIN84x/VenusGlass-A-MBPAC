@@ -25,6 +25,11 @@ from PySide6.QtWidgets import (
 from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
 from hmi_app.core.engine import QCPreviewEngine, get_configured_tolerances
+from hmi_app.core.overlay import (
+    draw_adaptive_text,
+    draw_cctv_footer,
+    draw_operator_measurement_hud,
+)
 
 
 class AutoPage(QWidget):
@@ -37,6 +42,7 @@ class AutoPage(QWidget):
         self.cam = cam
 
         self._running = False
+        self._last_evidence_bgr = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.on_tick)
 
@@ -100,7 +106,7 @@ class AutoPage(QWidget):
         self.chk_show_legacy_debug.setChecked(False)
         vb.addWidget(self.chk_show_legacy_debug)
 
-        self.chk_show_stab_text = QCheckBox("Stabilizer text")
+        self.chk_show_stab_text = QCheckBox("Measurement HUD")
         self.chk_show_stab_text.setChecked(True)
         vb.addWidget(self.chk_show_stab_text)
 
@@ -237,6 +243,25 @@ class AutoPage(QWidget):
         setattr(self.engine.settings, "show_raw_points", bool(self.chk_show_raw_points.isChecked()))
         setattr(self.engine.settings, "show_legacy_debug", bool(self.chk_show_legacy_debug.isChecked()))
         setattr(self.engine.settings, "show_stabilizer_text", bool(self.chk_show_stab_text.isChecked()))
+        # Guidance and measurement text are redrawn below, after display zoom.
+        self.engine.settings.defer_operator_hud = True
+
+    def get_evidence_frame(self):
+        """Return the last fully annotated Auto frame for a future Reports page."""
+        if self._last_evidence_bgr is None:
+            return None
+        return self._last_evidence_bgr.copy()
+
+    @staticmethod
+    def _timestamp_for_footer(out) -> str:
+        stab = getattr(out, "stab_info", None)
+        if isinstance(stab, dict):
+            stamp = stab.get("frame_timestamp")
+            if isinstance(stamp, dict) and stamp.get("local"):
+                return str(stamp["local"])
+
+        raw = str(getattr(out, "captured_at", "") or "")
+        return raw.replace("T", " ")[:19] or "---- -- -- --:--:--"
 
     def _reset_alarm_state(self):
         self._track_alarm_since = None
@@ -679,8 +704,7 @@ class AutoPage(QWidget):
                 line_type=cv2.LINE_AA,
             )
 
-            cv2.putText(vis, "TARGET", (ex + 16, ey - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 0, 0), 4, cv2.LINE_AA)
-            cv2.putText(vis, "TARGET", (ex + 16, ey - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 0, 255), 1, cv2.LINE_AA)
+            draw_adaptive_text(vis, "TARGET", (ex + 16, ey - 18), scale=0.50, thickness=1)
 
         if cur_d is not None and exp_d is not None:
             cx = max(0, min(W - 1, cur_d[0]))
@@ -778,12 +802,29 @@ class AutoPage(QWidget):
         # Zoom first so the alarm HUD stays full-screen on top of the zoomed feed.
         display = self._zoom_display_image(display, out)
 
-        # Draw operator guidance AFTER zoom so it never gets cropped away.
+        # Draw operator-facing annotations AFTER zoom so the readable HUD stays
+        # on screen and exists exactly once.
+        if self.chk_show_stab.isChecked() and self.chk_show_stab_text.isChecked():
+            draw_operator_measurement_hud(display, getattr(out, "stab_info", None))
+
         display = self._draw_operator_guidance_hud(display, out)
 
         alarm_on, alarm_elapsed = self._update_track_alarm(out)
         if alarm_on:
             display = self._draw_track_alarm_overlay(display, alarm_elapsed)
+
+        # Burn report evidence metadata into the final displayed frame.  It is
+        # deliberately last so zoom/alarm rendering cannot cover or crop it.
+        fps_value = getattr(self.engine, "_fps", None)
+        if fps_value is not None and float(fps_value) <= 0:
+            fps_value = None
+        draw_cctv_footer(
+            display,
+            timestamp=self._timestamp_for_footer(out),
+            product_name=getattr(self.engine.recipe, "name", "NO PRODUCT"),
+            fps=fps_value,
+        )
+        self._last_evidence_bgr = display.copy()
 
         self.view.set_bgr(display)
         self._set_status(out.status_text)

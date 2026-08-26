@@ -196,6 +196,177 @@ def _put_text(
     )
 
 
+def _text_background_luma(vis, text, org, *, scale=0.5, thickness=1):
+    """Estimate the luminance directly behind an OpenCV text glyph."""
+    if vis is None or getattr(vis, "size", 0) == 0:
+        return 0.0
+
+    try:
+        x, y = int(org[0]), int(org[1])
+        (tw, th), baseline = cv2.getTextSize(
+            str(text), cv2.FONT_HERSHEY_SIMPLEX, float(scale), int(thickness)
+        )
+    except Exception:
+        return 0.0
+
+    pad = max(3, int(thickness) + 2)
+    H, W = vis.shape[:2]
+    x0 = max(0, min(W - 1, x - pad))
+    y0 = max(0, min(H - 1, y - th - pad))
+    x1 = max(x0 + 1, min(W, x + tw + pad))
+    y1 = max(y0 + 1, min(H, y + baseline + pad))
+
+    patch = vis[y0:y1, x0:x1]
+    if patch.size == 0:
+        return 0.0
+
+    try:
+        if patch.ndim == 3:
+            gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = patch
+        return float(np.median(gray))
+    except Exception:
+        return 0.0
+
+
+def draw_adaptive_text(
+    vis,
+    text,
+    org,
+    *,
+    scale=0.5,
+    thickness=1,
+):
+    """Draw camera-style text that flips between black and white by background.
+
+    A thin opposite-colour halo remains in both modes, which keeps characters
+    legible over mixed glass, reflections, and coloured inspection overlays.
+    """
+    if vis is None:
+        return
+
+    luma = _text_background_luma(vis, text, org, scale=scale, thickness=thickness)
+    foreground = (8, 8, 8) if luma >= 145.0 else (255, 255, 255)
+    outline = (255, 255, 255) if luma >= 145.0 else (0, 0, 0)
+
+    x, y = int(org[0]), int(org[1])
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    cv2.putText(
+        vis,
+        str(text),
+        (x, y),
+        font,
+        float(scale),
+        outline,
+        max(int(thickness) + 2, 2),
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        vis,
+        str(text),
+        (x, y),
+        font,
+        float(scale),
+        foreground,
+        int(thickness),
+        cv2.LINE_AA,
+    )
+
+
+def draw_cctv_footer(vis, *, timestamp: str, product_name: str, fps: Optional[float] = None):
+    """Draw persistent, report-friendly camera metadata at the bottom left."""
+    if vis is None or getattr(vis, "size", 0) == 0:
+        return
+
+    H, W = vis.shape[:2]
+    if H < 30 or W < 80:
+        return
+
+    stamp = str(timestamp or "---- -- -- --:--:--")
+    product = str(product_name or "NO PRODUCT")
+    fps_text = "--.- FPS" if fps is None else f"{float(fps):.1f} FPS"
+    text = f"CAM 01 | {stamp} | {product} | {fps_text}"
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    available_w = max(40, W - 32)
+    scale = 0.55
+    (tw, _th), _base = cv2.getTextSize(text, font, scale, 1)
+
+    if tw > available_w:
+        scale = max(0.38, scale * available_w / max(1, tw))
+        (tw, _th), _base = cv2.getTextSize(text, font, scale, 1)
+
+    if tw > available_w:
+        # Keep timestamp and FPS intact; shorten only the product identifier.
+        product = product[: max(8, min(len(product), 16))]
+        text = f"CAM 01 | {stamp} | {product} | {fps_text}"
+
+    draw_adaptive_text(
+        vis,
+        text,
+        (16, max(22, H - 16)),
+        scale=scale,
+        thickness=1,
+    )
+
+
+def draw_operator_measurement_hud(vis, stab_info: dict, *, org=(18, 122)):
+    """Draw only the three values an operator needs to make a decision."""
+    if vis is None or not isinstance(stab_info, dict):
+        return
+
+    offset = _as_dict(stab_info.get("current_offset_display"))
+    measure = _as_dict(stab_info.get("current_notch_measure"))
+    tolerance = _as_dict(stab_info.get("active_tolerance"))
+    lines = []
+
+    try:
+        unit = str(offset.get("unit", "px"))
+        dx = float(offset.get("dx"))
+        dy = float(offset.get("dy"))
+        lines.append(f"OFFSET  X {dx:+.2f}{unit}   Y {dy:+.2f}{unit}")
+    except Exception:
+        pass
+
+    try:
+        dtheta = float(measure.get("dtheta"))
+        lines.append(f"ANGLE   {dtheta:+.2f} deg")
+    except Exception:
+        pass
+
+    try:
+        angle_limit = float(tolerance.get("angle_deg"))
+        x_mm = tolerance.get("x_mm")
+        y_mm = tolerance.get("y_mm")
+        if x_mm is not None and y_mm is not None:
+            lines.append(
+                f"LIMITS  X/Y +/- {float(x_mm):.2f}mm   ANG +/- {angle_limit:.2f}deg"
+            )
+        else:
+            lines.append(f"LIMITS  X/Y need scale   ANG +/- {angle_limit:.2f}deg")
+    except Exception:
+        pass
+
+    if not lines:
+        return
+
+    H, W = vis.shape[:2]
+    scale = 0.55 if W >= 1100 else 0.46
+    x = max(12, int(org[0]))
+    y = max(30, int(org[1]))
+
+    for i, line in enumerate(lines[:3]):
+        draw_adaptive_text(
+            vis,
+            line,
+            (x, min(H - 20, y + i * 24)),
+            scale=scale,
+            thickness=1,
+        )
+
+
 def _draw_points(vis, pts, color=(0, 255, 255), radius=1, step=16):
     arr = _as_points(pts)
 
@@ -550,14 +721,7 @@ def _draw_expected_center_guidance(vis, stab_info: dict):
         line_type=cv2.LINE_AA,
     )
 
-    _put_text(
-        vis,
-        "TARGET",
-        (ex + 16, ey - 18),
-        scale=0.50,
-        color=(255, 0, 255),
-        thickness=1,
-    )
+    draw_adaptive_text(vis, "TARGET", (ex + 16, ey - 18), scale=0.50, thickness=1)
 
     if current_pt is None:
         return
@@ -587,8 +751,6 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
         return
 
     ok = bool(stab_info.get("ok", False))
-    method = str(stab_info.get("current_anchor_method", stab_info.get("anchor_method", "unknown")))
-
     # Support both older and newer EngineSettings names.
     show_search = bool(_setting_any(settings, ("show_search_roi", "show_stab_search_roi"), True))
     show_contour = bool(_setting_any(settings, ("show_notch_contour", "show_stab_notch_contour"), True))
@@ -597,6 +759,7 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
     show_points = bool(_setting_any(settings, ("show_raw_points", "show_stab_feature_points"), False))
     show_legacy = bool(_setting_any(settings, ("show_legacy_debug", "show_stab_legacy"), False))
     show_text = bool(_setting_any(settings, ("show_stabilizer_text", "show_stab_text"), True))
+    defer_operator_hud = bool(_setting(settings, "defer_operator_hud", False))
 
     solid_dbg = _as_dict(stab_info.get("solid_edge_debug"))
     dark_dbg = _as_dict(stab_info.get("dark_region_debug"))
@@ -625,8 +788,6 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
                 1,
                 lineType=cv2.LINE_AA,
             )
-
-            _put_text(vis, "search", (x + 4, y + 16), scale=0.42, color=col)
         except Exception:
             pass
 
@@ -681,7 +842,6 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
 
             cv2.circle(vis, (x, y), 7, color, -1, lineType=cv2.LINE_AA)
             cv2.circle(vis, (x, y), 9, (0, 0, 0), 1, lineType=cv2.LINE_AA)
-            _put_text(vis, name, (x + 8, y - 8), scale=0.45, color=color)
 
         bl = _safe_cv_pt(geom.get("bottom_left"))
         br = _safe_cv_pt(geom.get("bottom_right"))
@@ -701,14 +861,14 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
         if cdy is not None:
             x, y = cdy
             cv2.circle(vis, (x, y), 6, (255, 180, 0), -1, lineType=cv2.LINE_AA)
-            _put_text(vis, "side_center@dy", (x + 8, y - 8), scale=0.45, color=(255, 180, 0))
 
     # ----------------------------
     # Expected baseplate target + correction arrow
     # ----------------------------
-    # This is independent from the debug anchor toggle because operators need
-    # this even when raw debug clutter is hidden.
-    _draw_expected_center_guidance(vis, stab_info)
+    # Auto Mode redraws this after display zoom, so it is never cropped and is
+    # not duplicated. Calibration/Manual overlays continue to draw it here.
+    if not defer_operator_hud:
+        _draw_expected_center_guidance(vis, stab_info)
 
     # ----------------------------
     # Legacy fallback debug
@@ -729,80 +889,8 @@ def draw_stab_debug(vis, stab_info: dict, *, settings=None):
     # ----------------------------
     # Text
     # ----------------------------
-    if show_text:
-        hyst = _as_dict(stab_info.get("hysteresis"))
-        bp_hyst = _as_dict(stab_info.get("baseplate_hysteresis"))
-        measure = _as_dict(stab_info.get("current_notch_measure"))
-        measure_mm = _as_dict(stab_info.get("current_notch_measure_mm"))
-        offset_display = _as_dict(stab_info.get("current_offset_display"))
-        corr = _as_dict(stab_info.get("baseplate_correction_vector"))
-
-        text_lines = [
-            f"anchor: {method}",
-            f"ROI: {stab_info.get('roi_mode', '-')}",
-            f"M raw delta: {hyst.get('mode', '-')}",
-        ]
-
-        if "dtranslation_px" in hyst:
-            try:
-                text_lines.append(f"raw dT: {float(hyst.get('dtranslation_px', 0.0)):.1f}px")
-            except Exception:
-                pass
-
-        if "dangle_deg" in hyst:
-            try:
-                text_lines.append(f"raw dA: {float(hyst.get('dangle_deg', 0.0)):.2f}deg")
-            except Exception:
-                pass
-
-        if measure_mm:
-            try:
-                text_lines.append(f"offset dx: {float(measure_mm.get('dx', 0.0)):+.2f}mm")
-                text_lines.append(f"offset dy: {float(measure_mm.get('dy', 0.0)):+.2f}mm")
-            except Exception:
-                pass
-        elif offset_display and offset_display.get("unit") == "mm":
-            try:
-                text_lines.append(f"offset dx: {float(offset_display.get('dx', 0.0)):+.2f}mm")
-                text_lines.append(f"offset dy: {float(offset_display.get('dy', 0.0)):+.2f}mm")
-            except Exception:
-                pass
-        elif measure:
-            try:
-                text_lines.append(f"notch dx: {float(measure.get('dx', 0.0)):+.1f}px")
-                text_lines.append(f"notch dy: {float(measure.get('dy', 0.0)):+.1f}px")
-            except Exception:
-                pass
-
-        if measure:
-            try:
-                text_lines.append(f"rel theta: {float(measure.get('relative_angle', 0.0)):+.2f}deg")
-            except Exception:
-                pass
-
-        if corr:
-            try:
-                unit = str(corr.get("unit", "px"))
-                text_lines.append(
-                    f"move: {float(corr.get('screen_dx', 0.0)):+.2f}{unit}, "
-                    f"{float(corr.get('screen_dy', 0.0)):+.2f}{unit}"
-                )
-            except Exception:
-                pass
-
-        px_per_mm = stab_info.get("baseplate_px_per_mm_saved", stab_info.get("baseplate_px_per_mm_frame"))
-        if px_per_mm is not None:
-            try:
-                text_lines.append(f"scale: {float(px_per_mm):.2f}px/mm")
-            except Exception:
-                pass
-
-        if bp_hyst:
-            text_lines.append(f"baseplate: {bp_hyst.get('mode', '-')}")
-
-        x0, y0 = 16, 145
-        for i, line in enumerate(text_lines):
-            _put_text(vis, line, (x0, y0 + i * 18), scale=0.5, color=(255, 255, 255))
+    if show_text and not defer_operator_hud:
+        draw_operator_measurement_hud(vis, stab_info)
 
 
 # ----------------------------
@@ -831,11 +919,8 @@ def draw_baseplate_overlay(vis, roi, center_rel, contour_rel, *, roi_poly=None):
             poly = np.asarray(roi_poly, dtype=np.int32).reshape(-1, 1, 2)
             if len(poly) >= 3:
                 cv2.polylines(vis, [poly], True, (255, 255, 0), 2, lineType=cv2.LINE_AA)
-                _put_text(vis, "rotated live ROI", tuple(poly[0, 0]), scale=0.45, color=(255, 255, 0))
         except Exception:
-            _put_text(vis, "live ROI", (x + 4, y + 18), scale=0.5, color=(255, 255, 0))
-    else:
-        _put_text(vis, "live ROI", (x + 4, y + 18), scale=0.5, color=(255, 255, 0))
+            pass
 
     if contour_rel is not None:
         try:
@@ -855,7 +940,6 @@ def draw_baseplate_overlay(vis, roi, center_rel, contour_rel, *, roi_poly=None):
 
             cv2.circle(vis, (cx, cy), 6, (0, 0, 255), -1, lineType=cv2.LINE_AA)
             cv2.circle(vis, (cx, cy), 9, (255, 255, 255), 1, lineType=cv2.LINE_AA)
-            _put_text(vis, "baseplate", (cx + 9, cy - 8), scale=0.45, color=(0, 0, 255))
         except Exception:
             pass
 
@@ -876,19 +960,75 @@ def draw_status_box(vis, text, state="FAIL"):
     else:
         color = (0, 0, 255)
 
-    box_w = min(max(760, int(len(str(text)) * 18)), vis.shape[1] - 40)
-    box_h = 100
+    H, W = vis.shape[:2]
+    if H < 60 or W < 150:
+        return
 
-    cv2.rectangle(vis, (20, 20), (20 + box_w, 20 + box_h), (20, 20, 20), -1)
-    cv2.rectangle(vis, (20, 20), (20 + box_w, 20 + box_h), color, 2, lineType=cv2.LINE_AA)
+    state_text = str(state or "FAIL").upper()
+    detail = str(text or "").strip()
 
-    cv2.circle(vis, (48, 70), 10, color, -1, cv2.LINE_AA)
+    if detail.upper().startswith(state_text):
+        detail = detail[len(state_text):].lstrip(" :|-" )
 
-    _put_text(
-        vis,
-        text,
-        (70, 80),
-        scale=0.9,
-        color=(255, 255, 255),
-        thickness=2,
+    detail = (
+        detail.replace("dx=", "X ")
+        .replace("dy=", "Y ")
+        .replace("dTheta=", "A ")
+        .replace("dtheta=", "A ")
     )
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    state_scale = 0.72
+    detail_scale = 0.50
+    state_thick = 2
+    detail_thick = 1
+
+    (state_w, _state_h), _ = cv2.getTextSize(state_text, font, state_scale, state_thick)
+    max_detail_w = max(40, W - 16 - 18 - 22 - state_w - 18)
+
+    detail_was_trimmed = False
+    while detail:
+        (detail_w, _detail_h), _ = cv2.getTextSize(detail, font, detail_scale, detail_thick)
+        if detail_w <= max_detail_w:
+            break
+        detail = detail[:-2].rstrip()
+        detail_was_trimmed = True
+
+    if detail and detail_was_trimmed:
+        detail = detail.rstrip(". ") + "..."
+
+    (detail_w, _detail_h), _ = cv2.getTextSize(detail, font, detail_scale, detail_thick)
+    # The detail starts after the status word, not after the dot.  Size the box
+    # from that real text origin so the final angle value is never clipped.
+    box_w = min(W - 32, max(230, 48 + state_w + 14 + detail_w + 16))
+    box_h = 62
+    x0, y0 = 16, 16
+    x1, y1 = x0 + box_w, y0 + box_h
+
+    cv2.rectangle(vis, (x0, y0), (x1, y1), (16, 16, 16), -1, lineType=cv2.LINE_AA)
+    cv2.rectangle(vis, (x0, y0), (x1, y1), color, 2, lineType=cv2.LINE_AA)
+    cv2.rectangle(vis, (x0, y0), (x0 + 7, y1), color, -1, lineType=cv2.LINE_AA)
+    cv2.circle(vis, (x0 + 24, y0 + box_h // 2), 8, color, -1, cv2.LINE_AA)
+
+    cv2.putText(
+        vis,
+        state_text,
+        (x0 + 40, y0 + 39),
+        font,
+        state_scale,
+        (255, 255, 255),
+        state_thick,
+        cv2.LINE_AA,
+    )
+
+    if detail:
+        cv2.putText(
+            vis,
+            detail,
+            (x0 + 48 + state_w, y0 + 38),
+            font,
+            detail_scale,
+            (255, 255, 255),
+            detail_thick,
+            cv2.LINE_AA,
+        )

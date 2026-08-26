@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Optional, Tuple, Any, Dict
 
 import cv2
@@ -730,6 +731,9 @@ class QCPreviewEngine:
         return clamp_roi((x, y, w, h), W, H)
 
     def process_frame(self, frame_bgr: np.ndarray) -> QCFrameOutput:
+        frame_time = datetime.now().astimezone()
+        captured_at = frame_time.isoformat(timespec="seconds")
+
         if self.recipe is None:
             out = QCFrameOutput(
                 overlay_bgr=frame_bgr,
@@ -739,6 +743,7 @@ class QCPreviewEngine:
                 status_text="Status: NO RECIPE LOADED",
                 state="FAIL",
                 roi_live=(0, 0, 1, 1),
+                captured_at=captured_at,
             )
             self._last_out = out
             return out
@@ -1059,6 +1064,10 @@ class QCPreviewEngine:
         if not isinstance(self._stab_info, dict):
             self._stab_info = {}
 
+        self._stab_info["frame_timestamp"] = {
+            "local": frame_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "iso": captured_at,
+        }
         self._stab_info["active_tolerance"] = dict(active_tolerance)
 
         if center_abs is not None:
@@ -1214,17 +1223,6 @@ class QCPreviewEngine:
 
         draw_status_box(overlay, text, state=state)
 
-        bottom = (
-            f"FPS: {self._fps:.1f} | "
-            f"Recipe: {self.recipe.name} | "
-            f"Config: {getattr(self.recipe, 'config_name', 'legacy')}"
-        )
-
-        y = overlay.shape[0] - 18
-
-        cv2.putText(overlay, bottom, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 6, cv2.LINE_AA)
-        cv2.putText(overlay, bottom, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-
         out = QCFrameOutput(
             overlay_bgr=overlay,
             raw_bgr=raw,
@@ -1233,6 +1231,7 @@ class QCPreviewEngine:
             status_text=f"Status: {state} | {text}",
             state=state,
             roi_live=roi_live,
+            captured_at=captured_at,
             stab_info=self._stab_info,
             center_rel=center_rel,
             angle=angle,
