@@ -27,3 +27,6 @@ output/
 *.zip
 *.7z
 
+!recipes/**/*.jpg
+!recipes/**/*.jpeg
+!recipes/**/*.png

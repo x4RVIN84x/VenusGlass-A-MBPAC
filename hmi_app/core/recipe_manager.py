@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from typing import List, Optional, Tuple
-
+import shutil
 import cv2
 
 from hmi_app.core.models import Recipe
@@ -42,6 +42,22 @@ class RecipeManager:
     # ----------------------------
     # Discovery
     # ----------------------------
+
+    def delete_recipe(self, recipe_name: str) -> bool:
+        """Permanently removes a recipe folder and all its configs/images."""
+        recipe_name = (recipe_name or "").strip()
+        if not recipe_name:
+            return False
+        recipe_dir = os.path.join(self.recipes_root, recipe_name)
+        if os.path.isdir(recipe_dir):
+            try:
+                shutil.rmtree(recipe_dir)
+                return True
+            except Exception as e:
+                print(f"[RecipeManager] Failed to delete {recipe_name}: {e}")
+                return False
+        return False
+
     def list_recipes(self) -> List[str]:
         if not os.path.isdir(self.recipes_root):
             return []
