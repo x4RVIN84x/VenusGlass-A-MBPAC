@@ -8,12 +8,13 @@ import cv2
 import numpy as np
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
     QVBoxLayout,
     QGroupBox,
+    QFrame,
+    QScrollArea,
     QLabel,
     QPushButton,
     QCheckBox,
@@ -33,10 +34,13 @@ from hmi_app.core.overlay import (
 
 
 class AutoPage(QWidget):
-    CONTROLS_FIXED_W = 430
+    # 420 logical px is already 525 physical px at the common 125% display
+    # scale.  Keeping it bounded preserves enough room for the live feed.
+    CONTROLS_FIXED_W = 420
 
     def __init__(self, *, engine: QCPreviewEngine, cam: OpenCVCamera, parent=None):
         super().__init__(parent)
+        self.setObjectName("AutoPage")
 
         self.engine = engine
         self.cam = cam
@@ -57,158 +61,320 @@ class AutoPage(QWidget):
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(12)
+        root.setSpacing(14)
 
         self.view = ImageView()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         root.addWidget(self.view, 1)
 
         self.controls_panel = QWidget()
+        self.controls_panel.setObjectName("AutoControlsPanel")
         self.controls_panel.setFixedWidth(self.CONTROLS_FIXED_W)
         self.controls_panel.setMinimumWidth(self.CONTROLS_FIXED_W)
         self.controls_panel.setMaximumWidth(self.CONTROLS_FIXED_W)
         self.controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        # Compatibility with integrations that accessed the old panel name.
+        self.auto_controls_panel = self.controls_panel
         root.addWidget(self.controls_panel, 0)
 
         panel = QVBoxLayout(self.controls_panel)
         panel.setContentsMargins(0, 0, 0, 0)
         panel.setSpacing(10)
 
-        gb = QGroupBox("Auto Controls")
-        vb = QVBoxLayout(gb)
-        vb.setSpacing(8)
+        # The operator-facing state stays pinned above the scrollable
+        # diagnostics, so it is readable even on a 1366/1536 logical screen.
+        summary = QFrame()
+        summary.setObjectName("OperatorSummary")
+        summary_lay = QVBoxLayout(summary)
+        summary_lay.setContentsMargins(16, 12, 16, 14)
+        summary_lay.setSpacing(2)
 
-        self.chk_show_stab = QCheckBox("Show stabilizer overlay")
+        state_eyebrow = QLabel("INSPECTION STATUS")
+        state_eyebrow.setObjectName("StateEyebrow")
+        state_eyebrow.setAlignment(Qt.AlignCenter)
+        summary_lay.addWidget(state_eyebrow)
+
+        self.lbl_state = QLabel("READY")
+        self.lbl_state.setObjectName("StateLabel")
+        self.lbl_state.setAlignment(Qt.AlignCenter)
+        summary_lay.addWidget(self.lbl_state)
+
+        self.lbl_status = QLabel("Select a product and press START")
+        self.lbl_status.setObjectName("StatusDetail")
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setMinimumHeight(36)
+        summary_lay.addWidget(self.lbl_status)
+        panel.addWidget(summary)
+
+        # This is intentionally outside the diagnostic scroll area: the PASS
+        # criteria are operator information, not calibration-only metadata.
+        self.lbl_tolerance = QLabel("ACCEPTANCE LIMITS\nNo product loaded")
+        self.lbl_tolerance.setObjectName("ToleranceCard")
+        self.lbl_tolerance.setAlignment(Qt.AlignCenter)
+        self.lbl_tolerance.setWordWrap(True)
+        self.lbl_tolerance.setMinimumHeight(62)
+        self.lbl_tolerance.setToolTip("Acceptance limits saved for the active product.")
+        panel.addWidget(self.lbl_tolerance)
+
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.controls_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        scroll_content = QWidget()
+        scroll_lay = QVBoxLayout(scroll_content)
+        scroll_lay.setContentsMargins(0, 0, 5, 0)
+        scroll_lay.setSpacing(10)
+        self.controls_scroll.setWidget(scroll_content)
+
+        display_gb = QGroupBox("DISPLAY & GUIDANCE")
+        display_lay = QVBoxLayout(display_gb)
+        display_lay.setContentsMargins(14, 18, 14, 12)
+        display_lay.setSpacing(6)
+
+        self.chk_show_stab = QCheckBox("Show alignment guidance")
         self.chk_show_stab.setChecked(True)
-        vb.addWidget(self.chk_show_stab)
+        display_lay.addWidget(self.chk_show_stab)
 
-        self.chk_show_search_roi = QCheckBox("Search ROI box")
-        self.chk_show_search_roi.setChecked(True)
-        vb.addWidget(self.chk_show_search_roi)
-
-        self.chk_show_notch_contour = QCheckBox("Actual notch contour edge")
-        self.chk_show_notch_contour.setChecked(True)
-        vb.addWidget(self.chk_show_notch_contour)
-
-        self.chk_show_fitted_lines = QCheckBox("Fitted notch lines")
-        self.chk_show_fitted_lines.setChecked(True)
-        vb.addWidget(self.chk_show_fitted_lines)
-
-        self.chk_show_new_anchors = QCheckBox("New anchors / skeleton")
-        self.chk_show_new_anchors.setChecked(True)
-        vb.addWidget(self.chk_show_new_anchors)
-
-        self.chk_show_raw_points = QCheckBox("Raw feature points")
-        self.chk_show_raw_points.setChecked(False)
-        vb.addWidget(self.chk_show_raw_points)
-
-        self.chk_show_legacy_debug = QCheckBox("Legacy dot/line fallback debug")
-        self.chk_show_legacy_debug.setChecked(False)
-        vb.addWidget(self.chk_show_legacy_debug)
-
-        self.chk_show_stab_text = QCheckBox("Measurement HUD")
+        self.chk_show_stab_text = QCheckBox("Show measurement cards on the feed")
         self.chk_show_stab_text.setChecked(True)
-        vb.addWidget(self.chk_show_stab_text)
+        display_lay.addWidget(self.chk_show_stab_text)
 
-        self.chk_show_bp = QCheckBox("Show baseplate contour + center")
-        self.chk_show_bp.setChecked(True)
-        vb.addWidget(self.chk_show_bp)
+        self.chk_show_bp = QCheckBox("Show baseplate outline and centre")
+        # Alignment is clearer from the target/adjustment cue.  The full
+        # baseplate geometry is useful during setup, but distracts in normal
+        # operator mode, so it remains available rather than enabled by default.
+        self.chk_show_bp.setChecked(False)
+        display_lay.addWidget(self.chk_show_bp)
 
-        self.chk_alarm = QCheckBox("DRAMATIC lost-track alarm after 5s")
-        self.chk_alarm.setChecked(True)
-        self.chk_alarm.setStyleSheet("""
-            QCheckBox {
-                color: #ffdddd;
-                font-weight: 900;
-            }
-        """)
-        vb.addWidget(self.chk_alarm)
-
-        self.lbl_alarm = QLabel("Alarm: armed")
-        self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 800; color: #d8d8d8;")
-        self.lbl_alarm.setWordWrap(False)
-        vb.addWidget(self.lbl_alarm)
-
-        self.btn_reset_alarm = QPushButton("RESET / ACK ALARM")
-        self.btn_reset_alarm.setEnabled(False)
-        self.btn_reset_alarm.clicked.connect(self.reset_alarm)
-        vb.addWidget(self.btn_reset_alarm)
-
-        # Display zoom
-        self.chk_zoom = QCheckBox("Enable display zoom around baseplate")
+        self.chk_zoom = QCheckBox("Zoom around the baseplate")
         self.chk_zoom.setChecked(True)
-        vb.addWidget(self.chk_zoom)
+        display_lay.addWidget(self.chk_zoom)
 
-        self.lbl_zoom = QLabel("Display zoom: 1.00x")
-        self.lbl_zoom.setStyleSheet("font-size: 12px; font-weight: 800;")
-        vb.addWidget(self.lbl_zoom)
+        self.lbl_zoom = QLabel("DISPLAY ZOOM  1.00×")
+        self.lbl_zoom.setObjectName("HeaderCaption")
+        display_lay.addWidget(self.lbl_zoom)
 
         self.sld_zoom = QSlider(Qt.Horizontal)
         self.sld_zoom.setRange(100, 300)
         self.sld_zoom.setValue(100)
         self.sld_zoom.valueChanged.connect(self._update_zoom_label)
-        vb.addWidget(self.sld_zoom)
+        display_lay.addWidget(self.sld_zoom)
+        scroll_lay.addWidget(display_gb)
 
-        vb.addWidget(QLabel("Stabilize cadence (every N frames)"))
+        diagnostics_gb = QGroupBox("ENGINEERING DIAGNOSTICS")
+        diagnostics_lay = QVBoxLayout(diagnostics_gb)
+        diagnostics_lay.setContentsMargins(14, 18, 14, 12)
+        diagnostics_lay.setSpacing(6)
+
+        diagnostics_hint = QLabel("Optional overlays for setup and troubleshooting")
+        diagnostics_hint.setObjectName("HeaderCaption")
+        diagnostics_hint.setWordWrap(True)
+        diagnostics_lay.addWidget(diagnostics_hint)
+
+        self.chk_show_search_roi = QCheckBox("Search ROI box")
+        self.chk_show_search_roi.setChecked(False)
+        diagnostics_lay.addWidget(self.chk_show_search_roi)
+
+        self.chk_show_notch_contour = QCheckBox("Detected notch contour")
+        self.chk_show_notch_contour.setChecked(False)
+        diagnostics_lay.addWidget(self.chk_show_notch_contour)
+
+        self.chk_show_fitted_lines = QCheckBox("Fitted notch lines")
+        self.chk_show_fitted_lines.setChecked(False)
+        diagnostics_lay.addWidget(self.chk_show_fitted_lines)
+
+        self.chk_show_new_anchors = QCheckBox("Anchors and skeleton")
+        self.chk_show_new_anchors.setChecked(False)
+        diagnostics_lay.addWidget(self.chk_show_new_anchors)
+
+        self.chk_show_raw_points = QCheckBox("Raw feature points")
+        self.chk_show_raw_points.setChecked(False)
+        diagnostics_lay.addWidget(self.chk_show_raw_points)
+
+        self.chk_show_legacy_debug = QCheckBox("Legacy fallback diagnostics")
+        self.chk_show_legacy_debug.setChecked(False)
+        diagnostics_lay.addWidget(self.chk_show_legacy_debug)
+
+        self.lbl_stab_n = QLabel("STABILIZATION CADENCE  6 FRAMES")
+        self.lbl_stab_n.setObjectName("HeaderCaption")
+        diagnostics_lay.addWidget(self.lbl_stab_n)
         self.sld_stab_n = QSlider(Qt.Horizontal)
         self.sld_stab_n.setRange(1, 20)
         self.sld_stab_n.setValue(6)
-        vb.addWidget(self.sld_stab_n)
+        self.sld_stab_n.valueChanged.connect(self._update_stab_n_label)
+        diagnostics_lay.addWidget(self.sld_stab_n)
 
-        vb.addWidget(QLabel("Search padding (px)"))
+        self.lbl_pad = QLabel("SEARCH PADDING  120 PX")
+        self.lbl_pad.setObjectName("HeaderCaption")
+        diagnostics_lay.addWidget(self.lbl_pad)
         self.sld_pad = QSlider(Qt.Horizontal)
         self.sld_pad.setRange(0, 250)
         self.sld_pad.setValue(120)
-        vb.addWidget(self.sld_pad)
+        self.sld_pad.valueChanged.connect(self._update_pad_label)
+        diagnostics_lay.addWidget(self.sld_pad)
+        scroll_lay.addWidget(diagnostics_gb)
+        scroll_lay.addStretch(1)
+        panel.addWidget(self.controls_scroll, 1)
 
-        # Kept directly above the changing status so the operator can always
-        # see the active PASS limits without digging into Calibration.
-        self.lbl_tolerance = QLabel("Limits: —")
-        self.lbl_tolerance.setStyleSheet(
-            "font-size: 11px; font-weight: 900; color: #cbd9ff; "
-            "background: #171b25; border: 1px solid #2f3a54; "
-            "border-radius: 5px; padding: 3px 6px;"
-        )
-        self.lbl_tolerance.setWordWrap(False)
-        self.lbl_tolerance.setFixedHeight(26)
-        self.lbl_tolerance.setToolTip("Acceptance limits saved for the active product.")
-        vb.addWidget(self.lbl_tolerance)
+        safety = QFrame()
+        safety.setObjectName("AlarmCard")
+        safety_lay = QVBoxLayout(safety)
+        safety_lay.setContentsMargins(14, 10, 14, 12)
+        safety_lay.setSpacing(6)
 
-        self.lbl_status = QLabel("Status: IDLE")
-        self.lbl_status.setStyleSheet("font-size: 14px; font-weight: 800;")
-        self.lbl_status.setWordWrap(False)
-        self.lbl_status.setFixedHeight(32)
-        vb.addWidget(self.lbl_status)
+        self.chk_alarm = QCheckBox("Enable lost-track alarm (5 seconds)")
+        self.chk_alarm.setChecked(True)
+        self.chk_alarm.setStyleSheet("QCheckBox { color: #f5d49d; font-weight: 800; }")
+        safety_lay.addWidget(self.chk_alarm)
 
-        self.btn_start = QPushButton("START")
+        self.lbl_alarm = QLabel("Alarm armed — monitoring tracking")
+        self.lbl_alarm.setObjectName("AlarmLabel")
+        self.lbl_alarm.setWordWrap(True)
+        safety_lay.addWidget(self.lbl_alarm)
+
+        self.btn_reset_alarm = QPushButton("ACKNOWLEDGE ALARM")
+        self.btn_reset_alarm.setObjectName("AlarmAckButton")
+        self.btn_reset_alarm.setEnabled(False)
+        self.btn_reset_alarm.clicked.connect(self.reset_alarm)
+        safety_lay.addWidget(self.btn_reset_alarm)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        self.btn_start = QPushButton("START INSPECTION")
+        self.btn_start.setObjectName("StartButton")
         self.btn_stop = QPushButton("STOP")
+        self.btn_stop.setObjectName("StopButton")
         self.btn_stop.setEnabled(False)
-
-        vb.addWidget(self.btn_start)
-        vb.addWidget(self.btn_stop)
-
-        panel.addWidget(gb)
-        panel.addStretch(1)
+        actions.addWidget(self.btn_start, 2)
+        actions.addWidget(self.btn_stop, 1)
+        safety_lay.addLayout(actions)
+        panel.addWidget(safety)
 
         self.btn_start.clicked.connect(self.start)
         self.btn_stop.clicked.connect(self.stop)
 
         self._last_zoom_crop = None
         self._update_zoom_label()
+        self._update_stab_n_label()
+        self._update_pad_label()
         self._update_tolerance_label()
 
+    def _set_summary_state(self, state: str):
+        """Set the single, large state word used for arm's-length scanning."""
+        raw = str(state or "READY").upper()
+        aliases = {
+            "IDLE": "READY",
+            "STOPPED": "READY",
+            "RUNNING": "RUNNING",
+            "SEARCH": "SEARCHING",
+            "CAMERA": "CAMERA FAULT",
+            "FAULT": "FAULT",
+            "ERROR": "FAULT",
+        }
+        shown = aliases.get(raw, raw)
+        colors = {
+            "PASS": "#37d777",
+            "TRACK": "#f5b945",
+            "SEARCHING": "#b7c5d4",
+            "RUNNING": "#5cc8ff",
+            "READY": "#a9c4d9",
+            "NO PRODUCT": "#f5b945",
+            "CAMERA FAULT": "#ff7a83",
+            "FAULT": "#ff7a83",
+        }
+        color = colors.get(shown, "#d6e1eb")
+        self.lbl_state.setText(shown)
+        self.lbl_state.setStyleSheet(
+            f"font-size: 21pt; font-weight: 900; color: {color};"
+        )
+
+    @staticmethod
+    def _measurement_summary(stab: dict) -> str:
+        if not isinstance(stab, dict):
+            return ""
+
+        values = []
+        offset = stab.get("current_offset_display")
+        if isinstance(offset, dict):
+            try:
+                unit = str(offset.get("unit", "px"))
+                dx = float(offset.get("dx"))
+                dy = float(offset.get("dy"))
+                values.append(f"X {dx:+.2f} {unit}   •   Y {dy:+.2f} {unit}")
+            except (TypeError, ValueError):
+                pass
+
+        measure = stab.get("current_notch_measure")
+        if isinstance(measure, dict):
+            try:
+                dtheta = float(measure.get("dtheta"))
+                values.append(f"ANGLE {dtheta:+.2f}°")
+            except (TypeError, ValueError):
+                pass
+
+        return "\n".join(values)
+
     def _set_status(self, text: str):
-        fm = QFontMetrics(self.lbl_status.font())
-        self.lbl_status.setText(fm.elidedText(str(text), Qt.ElideRight, self.lbl_status.width()))
+        """Render non-measurement states without truncating useful information."""
+        raw = str(text or "Status: READY").strip()
+        detail = re.sub(r"^status\s*:\s*", "", raw, flags=re.IGNORECASE).strip()
+        upper = detail.upper()
+
+        if "NO PRODUCT" in upper:
+            state = "NO PRODUCT"
+        elif "CAMERA" in upper or "ENGINE ERROR" in upper or "FAIL" in upper:
+            state = "FAULT" if "CAMERA" not in upper else "CAMERA"
+        elif upper.startswith("PASS"):
+            state = "PASS"
+        elif upper.startswith("TRACK"):
+            state = "TRACK"
+        elif "SEARCH" in upper:
+            state = "SEARCH"
+        elif "RUNNING" in upper:
+            state = "RUNNING"
+        else:
+            state = "READY"
+
+        self._set_summary_state(state)
+        self.lbl_status.setText(detail or "Ready for inspection")
+
+    def _set_result_status(self, out):
+        """Show the verdict plus signed placement values once, in the side card."""
+        state = str(getattr(out, "state", "") or "TRACK").upper()
+        stab = getattr(out, "stab_info", None)
+        metrics = self._measurement_summary(stab)
+        lead = {
+            "PASS": "WITHIN ACCEPTANCE LIMITS",
+            "TRACK": "STABILISING THE CAMERA TRACK",
+            "SEARCH": "SEARCHING FOR THE BASEPLATE",
+            "FAIL": "OUTSIDE ACCEPTANCE LIMITS",
+        }.get(state, str(getattr(out, "status_text", "INSPECTION ACTIVE") or "INSPECTION ACTIVE"))
+
+        self._set_summary_state(state)
+        if metrics:
+            self.lbl_status.setText(f"{lead}\n{metrics}")
+        else:
+            self.lbl_status.setText(lead)
 
     def _update_zoom_label(self):
         z = float(self.sld_zoom.value()) / 100.0
-        self.lbl_zoom.setText(f"Display zoom: {z:.2f}x")
+        self.lbl_zoom.setText(f"DISPLAY ZOOM  {z:.2f}×")
+
+    def _update_stab_n_label(self):
+        self.lbl_stab_n.setText(
+            f"STABILIZATION CADENCE  {int(self.sld_stab_n.value())} FRAMES"
+        )
+
+    def _update_pad_label(self):
+        self.lbl_pad.setText(f"SEARCH PADDING  {int(self.sld_pad.value())} PX")
 
     def _update_tolerance_label(self):
         recipe = getattr(self.engine, "recipe", None)
         if recipe is None:
-            self.lbl_tolerance.setText("Limits: no product loaded")
+            self.lbl_tolerance.setText("ACCEPTANCE LIMITS\nNo product loaded")
             return
 
         tolerance = get_configured_tolerances(getattr(recipe, "cfg", {}))
@@ -218,15 +384,17 @@ class AutoPage(QWidget):
 
         if x_mm is not None and y_mm is not None:
             self.lbl_tolerance.setText(
-                f"LIMITS  X +/- {float(x_mm):.3f} mm | "
-                f"Y +/- {float(y_mm):.3f} mm | "
-                f"ang +/- {float(angle_deg):.2f} deg"
+                "ACCEPTANCE LIMITS\n"
+                f"X ± {float(x_mm):.3f} mm    Y ± {float(y_mm):.3f} mm    "
+                f"ANGLE ± {float(angle_deg):.2f}°"
             )
             return
 
         # Only uncalibrated, pre-v1.5.4.2 recipes can reach this path.
+        angle_text = "—" if angle_deg is None else f"± {float(angle_deg):.2f}°"
         self.lbl_tolerance.setText(
-            f"LIMITS  X/Y need calibration scale | ang +/- {float(angle_deg):.2f} deg"
+            "ACCEPTANCE LIMITS\n"
+            f"POSITION SCALE REQUIRED    ANGLE {angle_text}"
         )
 
     def _set_engine_settings_from_ui(self):
@@ -263,6 +431,12 @@ class AutoPage(QWidget):
         raw = str(getattr(out, "captured_at", "") or "")
         return raw.replace("T", " ")[:19] or "---- -- -- --:--:--"
 
+    def _set_alarm_message(self, text: str, color: str = "#f5d49d"):
+        self.lbl_alarm.setText(str(text))
+        self.lbl_alarm.setStyleSheet(
+            f"font-size: 10.5pt; font-weight: 800; color: {color};"
+        )
+
     def _reset_alarm_state(self):
         self._track_alarm_since = None
         self._track_alarm_active = False
@@ -270,8 +444,7 @@ class AutoPage(QWidget):
         self._track_alarm_flash_i = 0
         self._track_alarm_manual_hold = False
         self._track_alarm_last_reset_at = 0.0
-        self.lbl_alarm.setText("Alarm: armed")
-        self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 800; color: #d8d8d8;")
+        self._set_alarm_message("Alarm armed — monitoring tracking")
         self.btn_reset_alarm.setEnabled(False)
 
     def reset_alarm(self):
@@ -283,8 +456,7 @@ class AutoPage(QWidget):
         self._track_alarm_manual_hold = True
         self._track_alarm_last_reset_at = now
 
-        self.lbl_alarm.setText("Alarm: manually reset / monitoring again")
-        self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 900; color: #66d9ff;")
+        self._set_alarm_message("Alarm acknowledged — monitoring again", "#66d9ff")
         self.btn_reset_alarm.setEnabled(False)
 
     def _track_progress_from_out(self, out) -> int:
@@ -326,8 +498,7 @@ class AutoPage(QWidget):
     def _update_track_alarm(self, out) -> Tuple[bool, float]:
         if not self.chk_alarm.isChecked():
             self._reset_alarm_state()
-            self.lbl_alarm.setText("Alarm: disabled")
-            self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 800; color: #9a9a9a;")
+            self._set_alarm_message("Alarm disabled", "#94a3b8")
             return False, 0.0
 
         now = time.monotonic()
@@ -346,8 +517,7 @@ class AutoPage(QWidget):
         self._track_alarm_active = active
 
         if active:
-            self.lbl_alarm.setText(f"ALARM: lost track for {elapsed:.1f}s")
-            self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 1000; color: #ff4444;")
+            self._set_alarm_message(f"ALARM — lost track for {elapsed:.1f}s", "#ff6570")
             self.btn_reset_alarm.setEnabled(True)
 
             if now - self._track_alarm_last_beep >= 0.80:
@@ -357,11 +527,11 @@ class AutoPage(QWidget):
             remaining = max(0.0, float(self._track_alarm_after_s) - elapsed)
 
             if self._track_alarm_manual_hold:
-                self.lbl_alarm.setText(f"Alarm: reset acknowledged, re-arming in {remaining:.1f}s")
-                self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 900; color: #66d9ff;")
+                self._set_alarm_message(
+                    f"Acknowledged — re-arming in {remaining:.1f}s", "#66d9ff"
+                )
             else:
-                self.lbl_alarm.setText(f"Alarm: warning in {remaining:.1f}s")
-                self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 800; color: #ffcc66;")
+                self._set_alarm_message(f"Warning in {remaining:.1f}s", "#ffcc66")
 
             self.btn_reset_alarm.setEnabled(self._track_alarm_since is not None)
 
@@ -688,16 +858,19 @@ class AutoPage(QWidget):
         cur_d = self._map_abs_pt_to_display(cur, W, H) if cur is not None else None
         exp_d = self._map_abs_pt_to_display(exp, W, H) if exp is not None else None
 
+        guide_color = (255, 205, 32)   # cyan in BGR
+        current_color = (30, 190, 255)  # amber in BGR
+
         if exp_d is not None and (-80 <= exp_d[0] <= W + 80) and (-80 <= exp_d[1] <= H + 80):
             ex = max(0, min(W - 1, exp_d[0]))
             ey = max(0, min(H - 1, exp_d[1]))
 
-            cv2.circle(vis, (ex, ey), 22, (255, 0, 255), 3, lineType=cv2.LINE_AA)
-            cv2.circle(vis, (ex, ey), 13, (255, 255, 0), 2, lineType=cv2.LINE_AA)
+            cv2.circle(vis, (ex, ey), 22, guide_color, 3, lineType=cv2.LINE_AA)
+            cv2.circle(vis, (ex, ey), 13, current_color, 2, lineType=cv2.LINE_AA)
             cv2.drawMarker(
                 vis,
                 (ex, ey),
-                (255, 0, 255),
+                guide_color,
                 markerType=cv2.MARKER_CROSS,
                 markerSize=44,
                 thickness=3,
@@ -712,36 +885,22 @@ class AutoPage(QWidget):
             ex = max(0, min(W - 1, exp_d[0]))
             ey = max(0, min(H - 1, exp_d[1]))
 
-            cv2.arrowedLine(vis, (cx, cy), (ex, ey), (255, 0, 255), 4, cv2.LINE_AA, tipLength=0.25)
-            cv2.circle(vis, (cx, cy), 15, (0, 0, 255), 2, lineType=cv2.LINE_AA)
+            cv2.arrowedLine(vis, (cx, cy), (ex, ey), guide_color, 4, cv2.LINE_AA, tipLength=0.25)
+            cv2.circle(vis, (cx, cy), 15, current_color, 2, lineType=cv2.LINE_AA)
 
         lines = self._operator_lines_from_stab(stab)
         if lines:
+            # Keep this compact and deterministic.  The old card rendered a
+            # black and white copy of every glyph and looked like a flickering
+            # double exposure against changing glass reflections.
+            instruction = "ALIGN: " + " / ".join(lines)
             font = cv2.FONT_HERSHEY_SIMPLEX
-            scale = 0.58
-            thick = 2
-            sizes = [cv2.getTextSize(str(t), font, scale, thick)[0] for t in lines]
-            text_w = max((s[0] for s in sizes), default=180)
-            box_w = int(min(max(text_w + 48, 260), max(260, W - 48)))
-            box_h = 58 if len(lines) == 1 else 82
-
-            x0 = max(18, W - box_w - 24)
-            y0 = max(130, H - box_h - 48)
-            x1 = min(W - 18, x0 + box_w)
-            y1 = min(H - 18, y0 + box_h)
-
-            cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 0, 0), -1, lineType=cv2.LINE_AA)
-            cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 0, 255), 2, lineType=cv2.LINE_AA)
-            cv2.rectangle(vis, (x0, y0), (x0 + 8, y1), (255, 0, 255), -1, lineType=cv2.LINE_AA)
-
-            start_y = int(round((y0 + y1) * 0.5 - (len(lines) - 1) * 13 + 8))
-            for i, line in enumerate(lines):
-                (tw, _th), _base = cv2.getTextSize(str(line), font, scale, thick)
-                tx = int(round((x0 + x1) * 0.5 - tw * 0.5))
-                ty = int(round(start_y + i * 26))
-
-                cv2.putText(vis, str(line), (tx, ty), font, scale, (0, 0, 0), thick + 4, cv2.LINE_AA)
-                cv2.putText(vis, str(line), (tx, ty), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+            scale = 0.72
+            thickness = 2
+            text_w = cv2.getTextSize(instruction, font, scale, thickness)[0][0]
+            x = max(18, W - text_w - 40)
+            y = max(120, H - 88)
+            draw_adaptive_text(vis, instruction, (x, y), scale=scale, thickness=thickness)
 
         return vis
 
@@ -807,7 +966,8 @@ class AutoPage(QWidget):
         if self.chk_show_stab.isChecked() and self.chk_show_stab_text.isChecked():
             draw_operator_measurement_hud(display, getattr(out, "stab_info", None))
 
-        display = self._draw_operator_guidance_hud(display, out)
+        if self.chk_show_stab.isChecked():
+            display = self._draw_operator_guidance_hud(display, out)
 
         alarm_on, alarm_elapsed = self._update_track_alarm(out)
         if alarm_on:
@@ -827,7 +987,7 @@ class AutoPage(QWidget):
         self._last_evidence_bgr = display.copy()
 
         self.view.set_bgr(display)
-        self._set_status(out.status_text)
+        self._set_result_status(out)
 
     def close(self):
         try:

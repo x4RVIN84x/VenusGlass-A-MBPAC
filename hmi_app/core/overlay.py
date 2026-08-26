@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional, Tuple
 
 import cv2
@@ -196,6 +197,93 @@ def _put_text(
     )
 
 
+# Camera-HUD palette (OpenCV uses BGR).
+_HUD_BG = (18, 22, 29)
+_HUD_BG_ALT = (27, 33, 43)
+_HUD_TEXT = (248, 250, 252)
+_HUD_MUTED = (185, 196, 210)
+_HUD_CYAN = (255, 205, 32)
+_HUD_AMBER = (30, 190, 255)
+
+
+def _hud_scale(vis) -> float:
+    """Responsive scale tuned around the roughly 1050x590 Auto feed."""
+    try:
+        h, w = vis.shape[:2]
+    except Exception:
+        return 1.0
+    return float(np.clip(min(w / 1050.0, h / 590.0), 0.78, 1.55))
+
+
+def _rounded_panel(vis, rect, *, fill=_HUD_BG, border=(70, 82, 100), alpha=0.92, radius=12):
+    """Draw a clipped translucent rounded panel without touching the text layer."""
+    if vis is None or getattr(vis, "size", 0) == 0:
+        return None
+
+    h, w = vis.shape[:2]
+    x0, y0, x1, y1 = map(int, rect)
+    x0 = max(0, min(w - 1, x0))
+    y0 = max(0, min(h - 1, y0))
+    x1 = max(x0 + 1, min(w - 1, x1))
+    y1 = max(y0 + 1, min(h - 1, y1))
+    r = max(0, min(int(radius), (x1 - x0) // 2, (y1 - y0) // 2))
+
+    overlay = vis.copy()
+    if r <= 1:
+        cv2.rectangle(overlay, (x0, y0), (x1, y1), fill, -1, cv2.LINE_AA)
+    else:
+        cv2.rectangle(overlay, (x0 + r, y0), (x1 - r, y1), fill, -1)
+        cv2.rectangle(overlay, (x0, y0 + r), (x1, y1 - r), fill, -1)
+        for cx, cy in ((x0 + r, y0 + r), (x1 - r, y0 + r),
+                       (x0 + r, y1 - r), (x1 - r, y1 - r)):
+            cv2.circle(overlay, (cx, cy), r, fill, -1, cv2.LINE_AA)
+
+    cv2.addWeighted(overlay, float(alpha), vis, 1.0 - float(alpha), 0.0, vis)
+    if border is not None:
+        cv2.rectangle(vis, (x0, y0), (x1, y1), border, 1, cv2.LINE_AA)
+    return x0, y0, x1, y1
+
+
+def _draw_text_once(
+    vis,
+    text,
+    org,
+    *,
+    scale=0.65,
+    color=_HUD_TEXT,
+    thickness=1,
+    font=cv2.FONT_HERSHEY_SIMPLEX,
+):
+    """Render a single text layer; contrast comes from the HUD panel behind it."""
+    cv2.putText(
+        vis,
+        str(text),
+        (int(org[0]), int(org[1])),
+        font,
+        float(scale),
+        color,
+        max(1, int(thickness)),
+        cv2.LINE_AA,
+    )
+
+
+def _fit_text(text: str, max_width: int, *, font, scale: float, thickness: int) -> str:
+    """Ellipsize a label while retaining a useful minimum amount of context."""
+    value = str(text)
+    if max_width <= 0:
+        return ""
+    if cv2.getTextSize(value, font, scale, thickness)[0][0] <= max_width:
+        return value
+
+    suffix = "..."
+    while len(value) > 4:
+        value = value[:-1]
+        candidate = value.rstrip() + suffix
+        if cv2.getTextSize(candidate, font, scale, thickness)[0][0] <= max_width:
+            return candidate
+    return ""
+
+
 def _text_background_luma(vis, text, org, *, scale=0.5, thickness=1):
     """Estimate the luminance directly behind an OpenCV text glyph."""
     if vis is None or getattr(vis, "size", 0) == 0:
@@ -238,45 +326,50 @@ def draw_adaptive_text(
     scale=0.5,
     thickness=1,
 ):
-    """Draw camera-style text that flips between black and white by background.
+    """Draw stable camera text on a compact high-contrast backing plate.
 
-    A thin opposite-colour halo remains in both modes, which keeps characters
-    legible over mixed glass, reflections, and coloured inspection overlays.
+    The historical implementation sampled the live pixels every frame and
+    alternated between two outlined glyph layers.  Reflections made that text
+    visibly flicker.  Keeping this public name avoids breaking callers while
+    the rendering itself is now deterministic and report-friendly.
     """
-    if vis is None:
+    if vis is None or getattr(vis, "size", 0) == 0:
         return
-
-    luma = _text_background_luma(vis, text, org, scale=scale, thickness=thickness)
-    foreground = (8, 8, 8) if luma >= 145.0 else (255, 255, 255)
-    outline = (255, 255, 255) if luma >= 145.0 else (0, 0, 0)
 
     x, y = int(org[0]), int(org[1])
     font = cv2.FONT_HERSHEY_SIMPLEX
+    ui = _hud_scale(vis)
+    scale = max(float(scale), 0.62) * max(1.0, ui)
+    thickness = max(1, int(round(max(int(thickness), 1) * max(1.0, ui))))
+    (tw, th), baseline = cv2.getTextSize(str(text), font, scale, thickness)
+    pad_x = max(7, int(round(8 * ui)))
+    pad_y = max(5, int(round(6 * ui)))
+    h, w = vis.shape[:2]
 
-    cv2.putText(
+    # Keep the entire label on the evidence frame even when its anchor sits
+    # near a detected feature at an image edge.
+    tx = max(pad_x, min(w - tw - pad_x, x))
+    ty = max(th + pad_y, min(h - baseline - pad_y, y))
+    _rounded_panel(
         vis,
-        str(text),
-        (x, y),
-        font,
-        float(scale),
-        outline,
-        max(int(thickness) + 2, 2),
-        cv2.LINE_AA,
+        (tx - pad_x, ty - th - pad_y, tx + tw + pad_x, ty + baseline + pad_y),
+        fill=_HUD_BG,
+        border=(76, 91, 112),
+        alpha=0.90,
+        radius=max(5, int(round(7 * ui))),
     )
-    cv2.putText(
+    _draw_text_once(
         vis,
-        str(text),
-        (x, y),
-        font,
-        float(scale),
-        foreground,
-        int(thickness),
-        cv2.LINE_AA,
+        text,
+        (tx, ty),
+        scale=scale,
+        color=_HUD_TEXT,
+        thickness=thickness,
     )
 
 
 def draw_cctv_footer(vis, *, timestamp: str, product_name: str, fps: Optional[float] = None):
-    """Draw persistent, report-friendly camera metadata at the bottom left."""
+    """Draw a large, persistent CCTV evidence bar along the full feed width."""
     if vis is None or getattr(vis, "size", 0) == 0:
         return
 
@@ -284,55 +377,75 @@ def draw_cctv_footer(vis, *, timestamp: str, product_name: str, fps: Optional[fl
     if H < 30 or W < 80:
         return
 
+    ui = _hud_scale(vis)
+    footer_h = max(54, int(round(62 * ui)))
+    y0 = max(0, H - footer_h)
+    _rounded_panel(
+        vis,
+        (0, y0, W - 1, H - 1),
+        fill=(12, 16, 22),
+        border=None,
+        alpha=0.94,
+        radius=0,
+    )
+    cv2.line(vis, (0, y0), (W - 1, y0), _HUD_CYAN, max(2, int(round(2 * ui))), cv2.LINE_AA)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
     stamp = str(timestamp or "---- -- -- --:--:--")
     product = str(product_name or "NO PRODUCT")
     fps_text = "--.- FPS" if fps is None else f"{float(fps):.1f} FPS"
-    text = f"CAM 01 | {stamp} | {product} | {fps_text}"
+    margin = max(14, int(round(18 * ui)))
+    camera_scale = 0.61 * ui
+    stamp_scale = 0.75 * ui
+    meta_scale = 0.58 * ui
+    thick = max(1, int(round(2 * ui)))
+    baseline_y = H - max(15, int(round(18 * ui)))
 
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    available_w = max(40, W - 32)
-    scale = 0.55
-    (tw, _th), _base = cv2.getTextSize(text, font, scale, 1)
+    camera_text = "CAM 01"
+    camera_w = cv2.getTextSize(camera_text, font, camera_scale, thick)[0][0]
+    stamp_w = cv2.getTextSize(stamp, font, stamp_scale, thick)[0][0]
+    fps_w = cv2.getTextSize(fps_text, font, meta_scale, thick)[0][0]
+    camera_x = margin
+    stamp_x = camera_x + camera_w + max(22, int(round(28 * ui)))
+    fps_x = W - margin - fps_w
+    product_x = stamp_x + stamp_w + max(22, int(round(28 * ui)))
+    product_space = fps_x - product_x - max(20, int(round(24 * ui)))
+    product = _fit_text(product, product_space, font=font, scale=meta_scale, thickness=thick)
 
-    if tw > available_w:
-        scale = max(0.38, scale * available_w / max(1, tw))
-        (tw, _th), _base = cv2.getTextSize(text, font, scale, 1)
-
-    if tw > available_w:
-        # Keep timestamp and FPS intact; shorten only the product identifier.
-        product = product[: max(8, min(len(product), 16))]
-        text = f"CAM 01 | {stamp} | {product} | {fps_text}"
-
-    draw_adaptive_text(
-        vis,
-        text,
-        (16, max(22, H - 16)),
-        scale=scale,
-        thickness=1,
-    )
+    _draw_text_once(vis, camera_text, (camera_x, baseline_y), scale=camera_scale,
+                    color=_HUD_CYAN, thickness=thick)
+    _draw_text_once(vis, stamp, (stamp_x, baseline_y), scale=stamp_scale,
+                    color=_HUD_TEXT, thickness=thick)
+    if product:
+        _draw_text_once(vis, product, (product_x, baseline_y), scale=meta_scale,
+                        color=_HUD_MUTED, thickness=thick)
+    _draw_text_once(vis, fps_text, (fps_x, baseline_y), scale=meta_scale,
+                    color=_HUD_TEXT, thickness=thick)
 
 
 def draw_operator_measurement_hud(vis, stab_info: dict, *, org=(18, 122)):
-    """Draw only the three values an operator needs to make a decision."""
+    """Draw a large, stable measurement card intended for one-glance reading."""
     if vis is None or not isinstance(stab_info, dict):
         return
 
     offset = _as_dict(stab_info.get("current_offset_display"))
     measure = _as_dict(stab_info.get("current_notch_measure"))
     tolerance = _as_dict(stab_info.get("active_tolerance"))
-    lines = []
+    x_text = y_text = angle_text = None
+    limits_text = None
 
     try:
         unit = str(offset.get("unit", "px"))
         dx = float(offset.get("dx"))
         dy = float(offset.get("dy"))
-        lines.append(f"OFFSET  X {dx:+.2f}{unit}   Y {dy:+.2f}{unit}")
+        x_text = f"X  {dx:+.2f} {unit}"
+        y_text = f"Y  {dy:+.2f} {unit}"
     except Exception:
         pass
 
     try:
         dtheta = float(measure.get("dtheta"))
-        lines.append(f"ANGLE   {dtheta:+.2f} deg")
+        angle_text = f"ANGLE  {dtheta:+.2f} deg"
     except Exception:
         pass
 
@@ -341,30 +454,77 @@ def draw_operator_measurement_hud(vis, stab_info: dict, *, org=(18, 122)):
         x_mm = tolerance.get("x_mm")
         y_mm = tolerance.get("y_mm")
         if x_mm is not None and y_mm is not None:
-            lines.append(
-                f"LIMITS  X/Y +/- {float(x_mm):.2f}mm   ANG +/- {angle_limit:.2f}deg"
+            limits_text = (
+                f"LIMITS   X +/- {float(x_mm):.2f} mm   "
+                f"Y +/- {float(y_mm):.2f} mm   ANG +/- {angle_limit:.2f} deg"
             )
         else:
-            lines.append(f"LIMITS  X/Y need scale   ANG +/- {angle_limit:.2f}deg")
+            limits_text = f"LIMITS   POSITION SCALE NEEDED   ANG +/- {angle_limit:.2f} deg"
     except Exception:
         pass
 
-    if not lines:
+    # The acceptance limits are already permanently visible in the Auto-page
+    # side card.  A large but otherwise empty camera card while SEARCHING made
+    # the feed look unfinished, so only draw this when live placement exists.
+    if not any((x_text, y_text, angle_text)):
         return
 
     H, W = vis.shape[:2]
-    scale = 0.55 if W >= 1100 else 0.46
-    x = max(12, int(org[0]))
-    y = max(30, int(org[1]))
+    ui = _hud_scale(vis)
+    x0 = max(12, int(org[0]))
+    # Clear the result banner above it at every supported feed resolution.
+    y0 = max(int(org[1]), int(round(112 * ui)))
+    card_w = min(W - x0 - 14, max(450, int(round(550 * ui))))
+    card_h = max(116, int(round(132 * ui)))
+    if card_w < 260 or y0 >= H - 80:
+        return
+    y1 = min(H - 72, y0 + card_h)
+    if y1 - y0 < 92:
+        return
 
-    for i, line in enumerate(lines[:3]):
-        draw_adaptive_text(
-            vis,
-            line,
-            (x, min(H - 20, y + i * 24)),
-            scale=scale,
-            thickness=1,
-        )
+    _rounded_panel(
+        vis,
+        (x0, y0, x0 + card_w, y1),
+        fill=_HUD_BG,
+        border=(71, 86, 106),
+        alpha=0.91,
+        radius=max(8, int(round(12 * ui))),
+    )
+    cv2.rectangle(
+        vis,
+        (x0, y0),
+        (x0 + max(6, int(round(7 * ui))), y1),
+        _HUD_CYAN,
+        -1,
+        cv2.LINE_AA,
+    )
+
+    left = x0 + max(20, int(round(24 * ui)))
+    header_y = y0 + max(21, int(round(25 * ui)))
+    value_y = y0 + max(53, int(round(62 * ui)))
+    angle_y = y0 + max(82, int(round(96 * ui)))
+    limit_y = y1 - max(10, int(round(13 * ui)))
+    label_scale = 0.46 * ui
+    value_scale = 0.75 * ui
+    angle_scale = 0.64 * ui
+    limit_scale = 0.54 * ui
+    value_thick = max(1, int(round(2 * ui)))
+
+    _draw_text_once(vis, "LIVE POSITION", (left, header_y), scale=label_scale,
+                    color=_HUD_CYAN, thickness=value_thick)
+    position_parts = [part for part in (x_text, y_text) if part]
+    if position_parts:
+        _draw_text_once(vis, "       |       ".join(position_parts), (left, value_y),
+                        scale=value_scale, color=_HUD_TEXT, thickness=value_thick)
+    if angle_text:
+        _draw_text_once(vis, angle_text, (left, angle_y), scale=angle_scale,
+                        color=_HUD_TEXT, thickness=value_thick)
+    if limits_text:
+        fitted = _fit_text(limits_text, card_w - (left - x0) - 14,
+                           font=cv2.FONT_HERSHEY_SIMPLEX, scale=limit_scale,
+                           thickness=max(1, value_thick - 1))
+        _draw_text_once(vis, fitted, (left, limit_y), scale=limit_scale,
+                        color=_HUD_MUTED, thickness=max(1, value_thick - 1))
 
 
 def _draw_points(vis, pts, color=(0, 255, 255), radius=1, step=16):
@@ -467,44 +627,56 @@ def _draw_movement_badge_bottom_right(vis, corr: dict):
 
     H, W = vis.shape[:2]
 
+    ui = _hud_scale(vis)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.58
-    thick = 2
-    pad_x = 18
-    pad_y = 14
+    scale = 0.76 * ui
+    thick = max(1, int(round(2 * ui)))
+    pad_x = max(20, int(round(24 * ui)))
+    footer_clearance = max(70, int(round(78 * ui)))
+    title_h = max(24, int(round(27 * ui)))
+    line_gap = max(31, int(round(35 * ui)))
 
     sizes = [cv2.getTextSize(str(t), font, scale, thick)[0] for t in lines]
-    text_w = max((s[0] for s in sizes), default=180)
-    text_h = sum((s[1] for s in sizes)) + (len(lines) - 1) * 12
+    text_w = max((s[0] for s in sizes), default=220)
+    box_w = int(min(max(text_w + 2 * pad_x, 330 * ui), W - 36))
+    box_h = int(max(92 * ui, title_h + len(lines) * line_gap + 24 * ui))
+    margin_r = max(16, int(round(20 * ui)))
+    margin_b = footer_clearance
 
-    box_w = int(min(max(text_w + 2 * pad_x + 12, 260), max(260, W - 48)))
-    box_h = int(max(58, text_h + 2 * pad_y + 8))
+    x0 = max(14, W - box_w - margin_r)
+    y0 = max(126, H - box_h - margin_b)
+    x1 = min(W - 14, x0 + box_w)
+    y1 = min(H - footer_clearance + 4, y0 + box_h)
+    accent = (55, 215, 95) if lines == ["CENTERED"] else _HUD_AMBER
 
-    # Bottom-right, lifted above the footer text.
-    margin_r = 24
-    margin_b = 48
+    _rounded_panel(
+        vis,
+        (x0, y0, x1, y1),
+        fill=_HUD_BG,
+        border=accent,
+        alpha=0.94,
+        radius=max(8, int(round(12 * ui))),
+    )
+    cv2.rectangle(vis, (x0, y0), (x0 + max(7, int(round(9 * ui))), y1),
+                  accent, -1, cv2.LINE_AA)
 
-    x0 = max(18, W - box_w - margin_r)
-    y0 = max(130, H - box_h - margin_b)
-    x1 = min(W - 18, x0 + box_w)
-    y1 = min(H - 18, y0 + box_h)
+    _draw_text_once(
+        vis,
+        "OPERATOR ADJUSTMENT",
+        (x0 + pad_x, y0 + title_h),
+        scale=0.43 * ui,
+        color=accent,
+        thickness=max(1, thick - 1),
+    )
 
-    cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 0, 0), -1, lineType=cv2.LINE_AA)
-    cv2.rectangle(vis, (x0, y0), (x1, y1), (255, 0, 255), 2, lineType=cv2.LINE_AA)
-
-    # Magenta side strip so operator notices it without making it huge.
-    cv2.rectangle(vis, (x0, y0), (x0 + 8, y1), (255, 0, 255), -1, lineType=cv2.LINE_AA)
-
-    total_line_h = 26
-    start_y = int(round((y0 + y1) * 0.5 - (len(lines) - 1) * total_line_h * 0.5 + 8))
-
+    first_y = y0 + title_h + max(29, int(round(34 * ui)))
     for i, line in enumerate(lines):
-        (tw, th), _base = cv2.getTextSize(str(line), font, scale, thick)
-        tx = int(round((x0 + x1) * 0.5 - tw * 0.5))
-        ty = int(round(start_y + i * total_line_h))
-
-        cv2.putText(vis, str(line), (tx, ty), font, scale, (0, 0, 0), thick + 4, cv2.LINE_AA)
-        cv2.putText(vis, str(line), (tx, ty), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+        text_value = str(line)
+        tw = cv2.getTextSize(text_value, font, scale, thick)[0][0]
+        tx = max(x0 + pad_x, int(round((x0 + x1) * 0.5 - tw * 0.5)))
+        ty = int(round(first_y + i * line_gap))
+        _draw_text_once(vis, text_value, (tx, ty), scale=scale,
+                        color=_HUD_TEXT, thickness=thick)
 
 
 def _fallback_correction_from_stab(stab_info: dict):
@@ -948,87 +1120,80 @@ def draw_baseplate_overlay(vis, roi, center_rel, contour_rel, *, roi_poly=None):
 # Status box
 # ----------------------------
 def draw_status_box(vis, text, state="FAIL"):
-    if vis is None:
+    """Draw the primary inspection result as a large, stable operator banner."""
+    if vis is None or getattr(vis, "size", 0) == 0:
         return
 
-    if state == "PASS":
-        color = (0, 200, 0)
-    elif state == "TRACK":
-        color = (0, 200, 200)
-    elif state == "SEARCH":
-        color = (180, 180, 180)
+    state_text = str(state or "FAIL").upper()
+    if state_text == "PASS":
+        color = (60, 215, 92)
+    elif state_text == "TRACK":
+        color = _HUD_AMBER
+    elif state_text == "SEARCH":
+        color = (180, 190, 205)
     else:
-        color = (0, 0, 255)
+        color = (60, 75, 238)
 
     H, W = vis.shape[:2]
     if H < 60 or W < 150:
         return
 
-    state_text = str(state or "FAIL").upper()
     detail = str(text or "").strip()
 
-    if detail.upper().startswith(state_text):
+    if state_text == "SEARCH" and detail.upper() == "SEARCHING":
+        detail = ""
+    elif detail.upper().startswith(state_text):
         detail = detail[len(state_text):].lstrip(" :|-" )
 
-    detail = (
-        detail.replace("dx=", "X ")
-        .replace("dy=", "Y ")
-        .replace("dTheta=", "A ")
-        .replace("dtheta=", "A ")
-    )
+    detail = re.sub(r"\bdx\s*=\s*", "X  ", detail, flags=re.IGNORECASE)
+    detail = re.sub(r"\bdy\s*=\s*", "Y  ", detail, flags=re.IGNORECASE)
+    detail = re.sub(r"\bdtheta\s*=\s*", "ANGLE  ", detail, flags=re.IGNORECASE)
+    detail = re.sub(r"(?<=\d)(mm|px)\b", r" \1", detail, flags=re.IGNORECASE)
+    detail = re.sub(r"\s+", " ", detail).strip()
+    detail = re.sub(r"\s+Y\s+", "   |   Y  ", detail, flags=re.IGNORECASE)
+    detail = re.sub(r"\s+ANGLE\s+", "   |   ANGLE  ", detail, flags=re.IGNORECASE)
 
+    ui = _hud_scale(vis)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    state_scale = 0.72
-    detail_scale = 0.50
-    state_thick = 2
-    detail_thick = 1
-
-    (state_w, _state_h), _ = cv2.getTextSize(state_text, font, state_scale, state_thick)
-    max_detail_w = max(40, W - 16 - 18 - 22 - state_w - 18)
-
-    detail_was_trimmed = False
-    while detail:
-        (detail_w, _detail_h), _ = cv2.getTextSize(detail, font, detail_scale, detail_thick)
-        if detail_w <= max_detail_w:
-            break
-        detail = detail[:-2].rstrip()
-        detail_was_trimmed = True
-
-    if detail and detail_was_trimmed:
-        detail = detail.rstrip(". ") + "..."
-
-    (detail_w, _detail_h), _ = cv2.getTextSize(detail, font, detail_scale, detail_thick)
-    # The detail starts after the status word, not after the dot.  Size the box
-    # from that real text origin so the final angle value is never clipped.
-    box_w = min(W - 32, max(230, 48 + state_w + 14 + detail_w + 16))
-    box_h = 62
-    x0, y0 = 16, 16
+    state_scale = 1.02 * ui
+    detail_scale = 0.69 * ui
+    state_thick = max(2, int(round(2 * ui)))
+    detail_thick = max(1, int(round(2 * ui)))
+    box_h = max(76, int(round(86 * ui)))
+    x0 = max(12, int(round(16 * ui)))
+    y0 = max(12, int(round(16 * ui)))
+    dot_x = x0 + max(25, int(round(29 * ui)))
+    state_x = x0 + max(46, int(round(54 * ui)))
+    header_y = y0 + max(19, int(round(21 * ui)))
+    baseline_y = y0 + max(56, int(round(62 * ui)))
+    state_w = cv2.getTextSize(state_text, font, state_scale, state_thick)[0][0]
+    detail_x = state_x + state_w + max(23, int(round(30 * ui)))
+    max_detail_w = max(40, W - x0 - detail_x - max(28, int(round(36 * ui))))
+    detail = _fit_text(detail, max_detail_w, font=font, scale=detail_scale,
+                       thickness=detail_thick)
+    detail_w = cv2.getTextSize(detail, font, detail_scale, detail_thick)[0][0]
+    desired_w = detail_x - x0 + detail_w + max(23, int(round(28 * ui)))
+    box_w = min(W - x0 - 12, max(int(round(470 * ui)), desired_w))
     x1, y1 = x0 + box_w, y0 + box_h
 
-    cv2.rectangle(vis, (x0, y0), (x1, y1), (16, 16, 16), -1, lineType=cv2.LINE_AA)
-    cv2.rectangle(vis, (x0, y0), (x1, y1), color, 2, lineType=cv2.LINE_AA)
-    cv2.rectangle(vis, (x0, y0), (x0 + 7, y1), color, -1, lineType=cv2.LINE_AA)
-    cv2.circle(vis, (x0 + 24, y0 + box_h // 2), 8, color, -1, cv2.LINE_AA)
-
-    cv2.putText(
+    _rounded_panel(
         vis,
-        state_text,
-        (x0 + 40, y0 + 39),
-        font,
-        state_scale,
-        (255, 255, 255),
-        state_thick,
-        cv2.LINE_AA,
+        (x0, y0, x1, y1),
+        fill=(13, 17, 23),
+        border=color,
+        alpha=0.95,
+        radius=max(9, int(round(13 * ui))),
     )
+    cv2.rectangle(vis, (x0, y0), (x0 + max(7, int(round(9 * ui))), y1),
+                  color, -1, cv2.LINE_AA)
+    cv2.circle(vis, (dot_x, baseline_y - max(8, int(round(9 * ui)))),
+               max(8, int(round(9 * ui))), color, -1, cv2.LINE_AA)
 
+    _draw_text_once(vis, "INSPECTION RESULT", (state_x, header_y),
+                    scale=0.39 * ui, color=_HUD_MUTED,
+                    thickness=max(1, state_thick - 1))
+    _draw_text_once(vis, state_text, (state_x, baseline_y), scale=state_scale,
+                    color=_HUD_TEXT, thickness=state_thick)
     if detail:
-        cv2.putText(
-            vis,
-            detail,
-            (x0 + 48 + state_w, y0 + 38),
-            font,
-            detail_scale,
-            (255, 255, 255),
-            detail_thick,
-            cv2.LINE_AA,
-        )
+        _draw_text_once(vis, detail, (detail_x, baseline_y - max(2, int(round(3 * ui)))),
+                        scale=detail_scale, color=_HUD_TEXT, thickness=detail_thick)

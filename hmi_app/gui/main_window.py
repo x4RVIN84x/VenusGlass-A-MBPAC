@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QStackedWidget,
     QSizePolicy,
+    QButtonGroup,
 )
 
 from hmi_app.gui.styles import industrial_dark_stylesheet
@@ -37,13 +38,12 @@ class MainWindow(QMainWindow):
       - One recipe folder == one complete product definition.
     """
 
-    AUTO_CONTROLS_FIXED_W = 420
-
     def __init__(self):
         super().__init__()
 
         self.setWindowTitle("MBPAC QC Station (Industrial HMI)")
-        self.resize(1600, 920)
+        self.resize(1400, 820)
+        self.setMinimumSize(1180, 720)
         self.setStyleSheet(industrial_dark_stylesheet())
 
         repo_root = Path(__file__).resolve().parents[2]
@@ -58,44 +58,38 @@ class MainWindow(QMainWindow):
         self.cam = OpenCVCamera(index=0, width=1280, height=720, fps=30, use_dshow=True)
 
         root = QWidget()
+        root.setObjectName("MainSurface")
         self.setCentralWidget(root)
 
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(12)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(14)
 
         # =========================
         # Top bar
         # =========================
         top = QFrame()
-        top.setFixedHeight(64)
+        top.setObjectName("TopBar")
+        top.setFixedHeight(80)
         top_lay = QHBoxLayout(top)
-        top_lay.setContentsMargins(14, 10, 14, 10)
-        top_lay.setSpacing(12)
+        top_lay.setContentsMargins(18, 12, 18, 12)
+        top_lay.setSpacing(14)
 
         lbl_title = QLabel("MBPAC QC Station")
-        lbl_title.setStyleSheet("font-size: 18px; font-weight: 900;")
+        lbl_title.setObjectName("AppTitle")
 
-        lbl_recipe = QLabel("Product/Recipe:")
+        lbl_recipe = QLabel("PRODUCT / RECIPE")
+        lbl_recipe.setObjectName("HeaderCaption")
         self.cmb_recipe = QComboBox()
-        self.cmb_recipe.setMinimumWidth(240)
+        self.cmb_recipe.setMinimumWidth(280)
 
         self.badge = QLabel("IDLE")
+        self.badge.setObjectName("StateBadge")
         self.badge.setAlignment(Qt.AlignCenter)
-        self.badge.setFixedHeight(28)
-        self.badge.setMinimumWidth(90)
+        self.badge.setFixedHeight(38)
+        self.badge.setMinimumWidth(112)
         self.badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.badge.setStyleSheet(
-            """
-            QLabel {
-                background: #2a2a2e;
-                color: #cfcfcf;
-                border-radius: 14px;
-                font-weight: 800;
-                padding: 4px 12px;
-            }
-            """
-        )
+        self.set_state("IDLE")
 
         top_lay.addWidget(lbl_title)
         top_lay.addStretch(1)
@@ -108,22 +102,27 @@ class MainWindow(QMainWindow):
         # Body
         # =========================
         body = QHBoxLayout()
-        body.setSpacing(12)
+        body.setSpacing(14)
         outer.addLayout(body, 1)
 
         nav = QFrame()
-        nav.setFixedWidth(240)
+        nav.setObjectName("NavRail")
+        nav.setFixedWidth(224)
         nav_lay = QVBoxLayout(nav)
-        nav_lay.setContentsMargins(12, 12, 12, 12)
-        nav_lay.setSpacing(10)
+        nav_lay.setContentsMargins(12, 14, 12, 14)
+        nav_lay.setSpacing(8)
 
         self.btn_cal = QPushButton("CALIBRATION")
         self.btn_manual = QPushButton("MANUAL TEST")
         self.btn_auto = QPushButton("AUTO MODE")
         self.btn_reports = QPushButton("REPORTS")
 
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
         for b in (self.btn_cal, self.btn_manual, self.btn_auto, self.btn_reports):
-            b.setMinimumHeight(56)
+            b.setObjectName("NavButton")
+            b.setCheckable(True)
+            self.nav_group.addButton(b)
             nav_lay.addWidget(b)
 
         nav_lay.addStretch(1)
@@ -154,6 +153,7 @@ class MainWindow(QMainWindow):
         self.btn_reports.clicked.connect(lambda: self.stack.setCurrentWidget(self.page_reports))
 
         self.stack.setCurrentWidget(self.page_auto)
+        self.btn_auto.setChecked(True)
 
         # =========================
         # Recipe wiring
@@ -168,8 +168,6 @@ class MainWindow(QMainWindow):
         else:
             self.engine.recipe = None
             self.set_state("IDLE")
-
-        QTimer.singleShot(0, self._stabilize_auto_layout)
 
     # -------------------------
     # Product list/load
@@ -234,10 +232,10 @@ class MainWindow(QMainWindow):
     # -------------------------
     def set_state(self, text: str):
         colors = {
-            "IDLE": "#2a2a2e",
-            "READY": "#1f3d2b",
-            "RUNNING": "#1f2f3d",
-            "FAULT": "#3d1f1f",
+            "IDLE": "#283442",
+            "READY": "#16583a",
+            "RUNNING": "#15547a",
+            "FAULT": "#7b2832",
         }
         bg = colors.get(text, "#2a2a2e")
 
@@ -245,34 +243,17 @@ class MainWindow(QMainWindow):
             self.badge.setText(text)
             self.badge.setStyleSheet(
                 f"""
-                QLabel {{
+                QLabel#StateBadge {{
                     background: {bg};
                     color: #ffffff;
-                    border-radius: 14px;
-                    font-weight: 800;
-                    padding: 4px 12px;
+                    border: 1px solid rgba(255, 255, 255, 0.16);
+                    border-radius: 19px;
+                    font-size: 11pt;
+                    font-weight: 900;
+                    padding: 4px 16px;
                 }}
                 """
             )
-
-    # -------------------------
-    # Layout stabilization
-    # -------------------------
-    def _stabilize_auto_layout(self):
-        try:
-            page = getattr(self, "page_auto", None)
-            if page is None:
-                return
-
-            fixed_w = int(self.AUTO_CONTROLS_FIXED_W)
-            for attr in ("auto_controls_panel", "controls_panel", "right_panel", "panel_right", "auto_controls"):
-                w = getattr(page, attr, None)
-                if w is not None and isinstance(w, QWidget):
-                    w.setFixedWidth(fixed_w)
-                    w.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-                    break
-        except Exception as e:
-            print("[HMI] _stabilize_auto_layout error:", e)
 
     # -------------------------
     # Shutdown

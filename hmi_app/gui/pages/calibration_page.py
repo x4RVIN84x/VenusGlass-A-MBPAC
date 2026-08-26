@@ -75,7 +75,7 @@ def _copy_first_existing_golden(src_dir: Path, dst_dir: Path) -> bool:
 # ----------------------------
 def _lab(txt: str) -> QLabel:
     l = QLabel(txt)
-    l.setStyleSheet("font-size: 12px; font-weight: 900;")
+    l.setStyleSheet("font-size: 11pt; font-weight: 900;")
     return l
 
 
@@ -122,15 +122,15 @@ def _help_button(tip: str) -> QToolButton:
     b.setToolTip(tip)
     b.setCursor(Qt.WhatsThisCursor)
     b.setAutoRaise(False)
-    b.setFixedSize(22, 22)
+    b.setFixedSize(28, 28)
     b.setStyleSheet("""
         QToolButton {
             border: 1px solid #4a5166;
-            border-radius: 11px;
+            border-radius: 14px;
             color: #dfe6ff;
             background: #1c2030;
             font-weight: 900;
-            font-size: 12px;
+            font-size: 10.5pt;
         }
         QToolButton:hover {
             background: #2e385a;
@@ -181,6 +181,7 @@ class CalibrationPage(QWidget):
         parent=None,
     ):
         super().__init__(parent)
+        self.setObjectName("CalibrationPage")
 
         self.engine = engine
         self.recipe_manager = recipe_manager
@@ -260,7 +261,7 @@ class CalibrationPage(QWidget):
                 border: 1px solid {self.BORDER};
                 border-radius: 6px;
                 padding: 6px 8px;
-                font-size: 13px;
+                font-size: 11.5pt;
                 selection-background-color: {self.FOCUS};
                 selection-color: #ffffff;
             }}
@@ -279,7 +280,7 @@ class CalibrationPage(QWidget):
                 background-color: #202433;
                 border: 1px solid #6570a6;
                 padding: 10px;
-                font-size: 12px;
+                font-size: 10.5pt;
             }}
         """)
 
@@ -298,7 +299,7 @@ class CalibrationPage(QWidget):
 
         vb.addWidget(_lab("Current product:"))
         self.lbl_product = QLabel("—")
-        self.lbl_product.setStyleSheet("font-size: 13px; font-weight: 900;")
+        self.lbl_product.setStyleSheet("font-size: 12pt; font-weight: 900;")
         vb.addWidget(self.lbl_product)
 
         row = QHBoxLayout()
@@ -318,12 +319,12 @@ class CalibrationPage(QWidget):
         vb.addWidget(self.btn_capture)
 
         self.lbl_expected = QLabel("Expected: —")
-        self.lbl_expected.setStyleSheet("font-size: 12px; font-weight: 800;")
+        self.lbl_expected.setStyleSheet("font-size: 11pt; font-weight: 800;")
         self.lbl_expected.setWordWrap(True)
         vb.addWidget(self.lbl_expected)
 
         self.lbl_cfg_status = QLabel("Status: IDLE")
-        self.lbl_cfg_status.setStyleSheet("font-size: 13px; font-weight: 900;")
+        self.lbl_cfg_status.setStyleSheet("font-size: 12pt; font-weight: 900;")
         self.lbl_cfg_status.setWordWrap(True)
         vb.addWidget(self.lbl_cfg_status)
 
@@ -408,7 +409,7 @@ class CalibrationPage(QWidget):
         )
 
         self.lbl_scale = QLabel("Scale: —")
-        self.lbl_scale.setStyleSheet("font-size: 12px; font-weight: 800;")
+        self.lbl_scale.setStyleSheet("font-size: 11pt; font-weight: 800;")
         self.lbl_scale.setWordWrap(True)
         vb.addWidget(self.lbl_scale)
 
@@ -546,7 +547,7 @@ class CalibrationPage(QWidget):
 
         hint = QLabel("PASS limits for this product. They are saved in mm and degrees.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("font-size: 12px; font-weight: 800; color: #aeb3c2;")
+        hint.setStyleSheet("font-size: 11pt; font-weight: 800; color: #aeb3c2;")
         vb.addWidget(hint)
 
         self.sp_tol_x_mm = QDoubleSpinBox()
@@ -755,7 +756,7 @@ class CalibrationPage(QWidget):
 
         self.lbl_live = QLabel("Live: parameters apply to preview automatically")
         self.lbl_live.setWordWrap(True)
-        self.lbl_live.setStyleSheet("font-size: 12px; font-weight: 800; color: #aeb3c2;")
+        self.lbl_live.setStyleSheet("font-size: 11pt; font-weight: 800; color: #aeb3c2;")
         vb.addWidget(self.lbl_live)
 
         self.btn_save = QPushButton("SAVE PRODUCT JSON")

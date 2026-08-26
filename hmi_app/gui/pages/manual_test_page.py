@@ -35,6 +35,7 @@ class ManualTestPage(QWidget):
         parent=None,
     ):
         super().__init__(parent)
+        self.setObjectName("ManualTestPage")
         self.engine = engine
         self.recipe_manager = recipe_manager
         self.cam = cam
@@ -94,11 +95,11 @@ class ManualTestPage(QWidget):
         vb.addWidget(self.btn_run)
 
         self.lbl_status = QLabel("Status: IDLE")
-        self.lbl_status.setStyleSheet("font-size: 14px; font-weight: 800;")
+        self.lbl_status.setStyleSheet("font-size: 12pt; font-weight: 800;")
         vb.addWidget(self.lbl_status)
 
         self.lbl_metrics = QLabel("dx/dy/dθ: —")
-        self.lbl_metrics.setStyleSheet("font-size: 13px;")
+        self.lbl_metrics.setStyleSheet("font-size: 11pt; font-weight: 650;")
         vb.addWidget(self.lbl_metrics)
 
         panel_lay.addWidget(gb)
