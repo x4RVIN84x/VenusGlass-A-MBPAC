@@ -13,6 +13,7 @@ from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
 from hmi_app.core.engine import QCPreviewEngine
 from hmi_app.core.recipe_manager import RecipeManager
+from hmi_app.core.report_store import ReportStore
 
 
 class ManualTestPage(QWidget):
@@ -32,12 +33,14 @@ class ManualTestPage(QWidget):
         engine: QCPreviewEngine,
         recipe_manager: RecipeManager,
         cam: Optional[OpenCVCamera] = None,
+        report_store: Optional[ReportStore] = None,
         parent=None,
     ):
         super().__init__(parent)
         self.engine = engine
         self.recipe_manager = recipe_manager
         self.cam = cam
+        self.report_store = report_store
         self._owns_cam = cam is None
 
         if self.cam is None:
@@ -117,13 +120,26 @@ class ManualTestPage(QWidget):
         self._current_recipe_name = (recipe_name or "").strip()
         self._reload_configs()
 
+    def _tr(self, text: str) -> str:
+        localizer = getattr(self, "localizer", None)
+        return localizer.tr(text) if localizer is not None else str(text)
+
+    def _set_status(self, text: str):
+        self.lbl_status.setText(self._tr(text))
+
+    def retranslate_ui(self):
+        localizer = getattr(self, "localizer", None)
+        if localizer is not None:
+            localizer.apply_widget_text(self)
+        self._set_status(self.lbl_status.text())
+
     def _reload_configs(self):
         self.cmb_config.blockSignals(True)
         try:
             self.cmb_config.clear()
 
             if not self._current_recipe_name:
-                self.lbl_status.setText("Status: NO RECIPE")
+                self._set_status("Status: NO RECIPE")
                 return
 
             configs = self.recipe_manager.list_configs(self._current_recipe_name)
@@ -146,7 +162,7 @@ class ManualTestPage(QWidget):
             self.cmb_config.blockSignals(False)
 
         self._current_config_name = self.cmb_config.currentText()
-        self.lbl_status.setText("Status: READY")
+        self._set_status("Status: READY")
 
     def _on_config_changed(self, name: str):
         self._current_config_name = (name or "").strip() or None
@@ -163,9 +179,9 @@ class ManualTestPage(QWidget):
             else:
                 recipe = self.recipe_manager.load(self._current_recipe_name)
             self.engine.set_recipe(recipe)
-            self.lbl_status.setText("Status: READY")
+            self._set_status("Status: READY")
         except Exception as e:
-            self.lbl_status.setText(f"Status: CONFIG LOAD FAIL: {e}")
+            self._set_status(f"Status: CONFIG LOAD FAIL: {e}")
 
     def _apply_view_mode(self):
         if self.rb_raw.isChecked():
@@ -193,10 +209,10 @@ class ManualTestPage(QWidget):
     def grab_frame(self):
         ok, frame = self.cam.read()
         if not ok or frame is None:
-            self.lbl_status.setText("Status: CAMERA READ FAIL")
+            self._set_status("Status: CAMERA READ FAIL")
             return
         self._last_frame_bgr = frame
-        self.lbl_status.setText("Status: FRAME GRABBED")
+        self._set_status("Status: FRAME GRABBED")
         # show grabbed raw immediately
         self.view.set_bgr(frame)
 
@@ -207,12 +223,13 @@ class ManualTestPage(QWidget):
                 return
 
         if self.engine.recipe is None:
-            self.lbl_status.setText("Status: NO RECIPE LOADED")
+            self._set_status("Status: NO RECIPE LOADED")
             return
 
         out = self.engine.process_frame(self._last_frame_bgr)
         self._last_out = out
-        self.lbl_status.setText(out.status_text)
+        self._set_status(out.status_text)
+        self._record_report_result(out)
 
         # metrics
         if out.center_rel is not None and self.engine.recipe is not None:
@@ -227,6 +244,38 @@ class ManualTestPage(QWidget):
             self.lbl_metrics.setText("dx/dy/dθ: —")
 
         self._refresh_view_from_last()
+
+    def _record_report_result(self, out):
+        if self.report_store is None:
+            return
+
+        state = str(getattr(out, "state", "") or "").upper()
+        if state not in {"PASS", "FAIL"}:
+            return
+
+        stab_info = getattr(out, "stab_info", None)
+        metrics = stab_info.get("inspection_metrics") if isinstance(stab_info, dict) else None
+        failed_labels = []
+        if isinstance(metrics, (list, tuple)):
+            for metric in metrics:
+                if isinstance(metric, dict) and metric.get("passed") is False:
+                    label = str(metric.get("label", "")).replace(" OFFSET", "").strip()
+                    if label:
+                        failed_labels.append(label)
+
+        recipe = getattr(getattr(self.engine, "recipe", None), "name", "")
+        cause = " + ".join(dict.fromkeys(failed_labels)) if failed_labels else ""
+        if state == "FAIL" and not cause:
+            cause = "Outside recipe limits"
+        try:
+            self.report_store.record_result(
+                result=state,
+                recipe=recipe,
+                cause=cause,
+                metrics=metrics or [],
+            )
+        except Exception:
+            pass
 
     def close(self):
         try:

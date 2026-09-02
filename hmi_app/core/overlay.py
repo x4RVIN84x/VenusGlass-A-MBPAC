@@ -527,10 +527,6 @@ def _draw_expected_center_guidance(vis, stab_info: dict):
     current_pt = _safe_cv_pt(stab_info.get("current_baseplate_center_abs"))
     corr = _fallback_correction_from_stab(stab_info)
 
-    # Always try to draw the movement badge if we can derive the correction.
-    if corr is not None:
-        _draw_movement_badge_bottom_right(vis, corr)
-
     if expected_pt is None:
         return
 
@@ -863,32 +859,63 @@ def draw_baseplate_overlay(vis, roi, center_rel, contour_rel, *, roi_poly=None):
 # ----------------------------
 # Status box
 # ----------------------------
-def draw_status_box(vis, text, state="FAIL"):
+def draw_status_box(vis, text, state="FAIL", *, metrics=None, stability=None):
+    """Draw a compact operator-facing result card, not a debug console."""
     if vis is None:
         return
 
-    if state == "PASS":
-        color = (0, 200, 0)
-    elif state == "TRACK":
-        color = (0, 200, 200)
-    elif state == "SEARCH":
-        color = (180, 180, 180)
+    state = str(state or "FAIL").upper()
+    state_style = {
+        "PASS": ((46, 202, 99), "PASS"),
+        "TRACK": ((40, 201, 231), "VERIFYING"),
+        "SEARCH": ((155, 155, 155), "SEARCHING"),
+        "SETUP": ((73, 174, 243), "SETUP REQUIRED"),
+        "FAIL": ((70, 70, 235), "FAIL"),
+    }
+    color, state_label = state_style.get(state, state_style["FAIL"])
+
+    frame_h, frame_w = vis.shape[:2]
+    x, y = 18, 18
+    available_w = max(1, frame_w - (2 * x))
+    card_w = min(480, available_w)
+    show_metrics = isinstance(metrics, (list, tuple)) and bool(metrics) and card_w >= 360
+    card_h = 178 if show_metrics else 112
+    card_h = min(card_h, max(1, frame_h - (2 * y)))
+    right = x + card_w
+    bottom = y + card_h
+
+    # Dark surface, thin neutral outline, and a coloured state stripe give the
+    # result hierarchy without turning the camera view into a debug dashboard.
+    cv2.rectangle(vis, (x, y), (right, bottom), (24, 27, 34), -1, cv2.LINE_AA)
+    cv2.rectangle(vis, (x, y), (right, bottom), (80, 85, 96), 1, cv2.LINE_AA)
+    cv2.rectangle(vis, (x, y), (x + 7, bottom), color, -1, cv2.LINE_AA)
+
+    _put_text(vis, "INSPECTION RESULT", (x + 22, y + 28), scale=0.45, color=(205, 210, 220), thickness=1)
+    _put_text(vis, state_label, (x + 22, y + 73), scale=0.82, color=color, thickness=2)
+
+    if show_metrics:
+        metric_x = x + 172
+        row_y = y + 55
+
+        for index, metric in enumerate(metrics[:3]):
+            if not isinstance(metric, dict):
+                continue
+
+            yy = row_y + index * 36
+            label = str(metric.get("label", "MEASUREMENT"))
+            value = str(metric.get("value", "—"))
+            limit = str(metric.get("limit", ""))
+            passed = bool(metric.get("passed", False))
+            value_color = (46, 202, 99) if passed else (70, 70, 235)
+
+            _put_text(vis, label, (metric_x, yy), scale=0.38, color=(185, 190, 200), thickness=1)
+            _put_text(vis, value, (metric_x, yy + 17), scale=0.52, color=value_color, thickness=1)
+            _put_text(vis, limit, (metric_x + 152, yy + 17), scale=0.38, color=(185, 190, 200), thickness=1)
+
+        if isinstance(stability, (tuple, list)) and len(stability) >= 2:
+            footer = f"Verification: {int(stability[0])} / {int(stability[1])} steady frames"
+        else:
+            footer = str(text)
+        _put_text(vis, footer, (x + 22, bottom - 16), scale=0.42, color=(205, 210, 220), thickness=1)
     else:
-        color = (0, 0, 255)
-
-    box_w = min(max(760, int(len(str(text)) * 18)), vis.shape[1] - 40)
-    box_h = 100
-
-    cv2.rectangle(vis, (20, 20), (20 + box_w, 20 + box_h), (20, 20, 20), -1)
-    cv2.rectangle(vis, (20, 20), (20 + box_w, 20 + box_h), color, 2, lineType=cv2.LINE_AA)
-
-    cv2.circle(vis, (48, 70), 10, color, -1, cv2.LINE_AA)
-
-    _put_text(
-        vis,
-        text,
-        (70, 80),
-        scale=0.9,
-        color=(255, 255, 255),
-        thickness=2,
-    )
+        _put_text(vis, str(text), (x + 22, y + 101), scale=0.46, color=(235, 238, 245), thickness=1)

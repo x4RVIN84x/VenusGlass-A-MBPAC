@@ -56,7 +56,8 @@ class EngineSettings:
     show_new_anchors: bool = True
     show_raw_points: bool = False
     show_legacy_debug: bool = False
-    show_stabilizer_text: bool = True
+    # Operator feed is clean by default; diagnostic text remains available on demand.
+    show_stabilizer_text: bool = False
 
     # Older/legacy overlay toggle names.
     # Keep these so old pages/modules do not crash.
@@ -64,7 +65,7 @@ class EngineSettings:
     show_stab_feature_points: bool = False
     show_stab_anchors: bool = True
     show_stab_legacy: bool = False
-    show_stab_text: bool = True
+    show_stab_text: bool = False
 
     # PASS stability gate
     stable_need: int = 5

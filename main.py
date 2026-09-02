@@ -57,6 +57,38 @@ def _safe_crop(full_img, roi):
     return full_img[y:y + h, x:x + w].copy(), roi
 
 
+def _tolerances_px_from_cfg(cfg: dict):
+    """Resolve physical recipe limits into the pixel limits used by this legacy runner."""
+    if not isinstance(cfg, dict):
+        return None
+
+    raw_mm = cfg.get("tolerance_mm")
+    if isinstance(raw_mm, dict):
+        try:
+            scale = cfg.get("px_per_mm", cfg.get("baseplate_px_per_mm"))
+            if scale is None and isinstance(cfg.get("baseplate_scale"), dict):
+                scale = cfg["baseplate_scale"].get("px_per_mm")
+            scale = float(scale)
+            if scale <= 0:
+                return None
+            return {
+                "x": float(raw_mm["x"]) * scale,
+                "y": float(raw_mm["y"]) * scale,
+                "angle": float(raw_mm["angle"]),
+            }
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    raw_px = cfg.get("tolerance_px")
+    if not isinstance(raw_px, dict):
+        return None
+    try:
+        values = {key: float(raw_px[key]) for key in ("x", "y", "angle")}
+    except (TypeError, ValueError, KeyError):
+        return None
+    return values if all(value > 0 for value in values.values()) else None
+
+
 def _draw_roi(vis, roi, color, thickness=2):
     if roi is None:
         return
@@ -309,7 +341,10 @@ def process_one(test_image_path: str, cfg: dict):
     roi_cfg = tuple(cfg["roi"])
     golden_center_roi = tuple(cfg["expected_center"])  # ROI-relative (to baseplate ROI used in calib)
     golden_angle = float(cfg.get("expected_angle", 0.0))
-    tolerances = cfg.get("tolerance_px", {"x": 10, "y": 10, "angle": 5})
+    tolerances = _tolerances_px_from_cfg(cfg)
+    if tolerances is None:
+        print("Config missing valid recipe tolerances (set X/Y in mm and angle in Calibration)")
+        return
 
     golden_img_path = cfg.get("golden_image_path")
     if not golden_img_path:

@@ -10,12 +10,13 @@ from typing import Optional, Callable
 import cv2
 import numpy as np
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
     QVBoxLayout,
     QGroupBox,
+    QFrame,
     QLabel,
     QPushButton,
     QLineEdit,
@@ -77,6 +78,32 @@ def _lab(txt: str) -> QLabel:
     l = QLabel(txt)
     l.setStyleSheet("font-size: 12px; font-weight: 900;")
     return l
+
+
+class _StatusLabel(QLabel):
+    """QLabel with a signal for the calibration summary ribbon."""
+
+    statusChanged = Signal(str)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setProperty("_i18n_dynamic", True)
+        self._source_text = super().text()
+
+    def _localizer(self):
+        parent = self.parent()
+        while parent is not None:
+            localizer = getattr(parent, "localizer", None)
+            if localizer is not None:
+                return localizer
+            parent = parent.parent()
+        return None
+
+    def setText(self, text: str):
+        self._source_text = str(text)
+        localizer = self._localizer()
+        super().setText(localizer.tr(self._source_text) if localizer is not None else self._source_text)
+        self.statusChanged.emit(self._source_text)
 
 
 def _tip_html(
@@ -158,6 +185,8 @@ def _add_param(vb: QVBoxLayout, name: str, widget, tip: str):
 # Calibration Page
 # ----------------------------
 class CalibrationPage(QWidget):
+    configurationChanged = Signal()
+
     RIGHT_W_FRAC = 0.30
     RIGHT_W_MIN = 420
     RIGHT_W_MAX = 620
@@ -205,15 +234,22 @@ class CalibrationPage(QWidget):
         self._live_apply_timer.setSingleShot(True)
         self._live_apply_timer.timeout.connect(self._apply_tuning_to_live_recipe)
 
-        root = QHBoxLayout(self)
+        root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
+
+        self._build_status_summary()
+        root.addWidget(self.status_summary)
+
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(12)
 
         # Normal preview image. No proc dashboard / preview_stack on this branch.
         self.view = ImageView()
         self.view.setMinimumWidth(240)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        root.addWidget(self.view, 1)
+        content.addWidget(self.view, 1)
 
         self.controls_container = QWidget()
         self.controls_layout = QVBoxLayout(self.controls_container)
@@ -226,7 +262,8 @@ class CalibrationPage(QWidget):
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll.setWidget(self.controls_container)
         self.scroll.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        root.addWidget(self.scroll, 0)
+        content.addWidget(self.scroll, 0)
+        root.addLayout(content, 1)
 
         self.scroll.setStyleSheet(f"""
             QScrollArea {{
@@ -242,6 +279,7 @@ class CalibrationPage(QWidget):
 
         self._build_product_group()
         self._build_preview_group()
+        self._build_tolerance_group()
         self._build_baseplate_tuning_group()
         self._build_notch_tuning_group()
         self._build_save_group()
@@ -283,8 +321,224 @@ class CalibrationPage(QWidget):
         """)
 
         self._connect_tuning_signals()
+        self.lbl_cfg_status.statusChanged.connect(self._sync_calibration_summary_from_status)
         self._update_right_width()
         self._apply_view_mode()
+        self._sync_calibration_summary_from_status(self.lbl_cfg_status.text())
+
+    def _build_status_summary(self):
+        """Build the at-a-glance calibration reference/readout ribbon."""
+        self.status_summary = QFrame()
+        self.status_summary.setObjectName("calibrationStatusSummary")
+        self.status_summary.setMinimumHeight(122)
+
+        lay = QHBoxLayout(self.status_summary)
+        lay.setContentsMargins(24, 14, 24, 14)
+        lay.setSpacing(22)
+
+        state_column = QVBoxLayout()
+        title = QLabel("CALIBRATION STATUS")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 12px; font-weight: 900; color: #c7ccd8;")
+        state_column.addWidget(title)
+
+        self.lbl_cal_state = QLabel("READY")
+        self.lbl_cal_state.setAlignment(Qt.AlignCenter)
+        state_column.addWidget(self.lbl_cal_state)
+        lay.addLayout(state_column, 2)
+
+        reading_column = QVBoxLayout()
+        title = QLabel("LIVE CAMERA READING")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 12px; font-weight: 900; color: #c7ccd8;")
+        reading_column.addWidget(title)
+
+        self.lbl_cal_reading = QLabel("Start live preview to read the current position")
+        self.lbl_cal_reading.setAlignment(Qt.AlignCenter)
+        self.lbl_cal_reading.setWordWrap(True)
+        self.lbl_cal_reading.setMinimumHeight(48)
+        reading_column.addWidget(self.lbl_cal_reading)
+        lay.addLayout(reading_column, 5)
+
+        golden_column = QVBoxLayout()
+        title = QLabel("SAVED GOLDEN REFERENCE")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 12px; font-weight: 900; color: #c7ccd8;")
+        golden_column.addWidget(title)
+
+        self.lbl_cal_golden = QLabel("No golden coordinates saved")
+        self.lbl_cal_golden.setAlignment(Qt.AlignCenter)
+        self.lbl_cal_golden.setWordWrap(True)
+        self.lbl_cal_golden.setMinimumHeight(48)
+        self.lbl_cal_golden.setStyleSheet(
+            "padding: 5px; font-size: 14px; font-weight: 800; color: #dbe4f2;"
+        )
+        golden_column.addWidget(self.lbl_cal_golden)
+        lay.addLayout(golden_column, 4)
+
+        self._calibration_summary_state = ""
+
+    def _set_calibration_summary_state(self, state: str):
+        state = str(state or "READY").upper()
+        styles = {
+            "READY": ("READY", "#1f3d2b", "#78d89c"),
+            "LIVE": ("READING", "#173a58", "#66c6ff"),
+            "ALIGNED": ("ALIGNED", "#123c27", "#38d27b"),
+            "VERIFYING": ("VERIFYING", "#5a3414", "#f2a23a"),
+            "OFFSET": ("OFFSET DETECTED", "#541c25", "#ff6673"),
+            "SEARCH": ("SEARCHING", "#303744", "#aeb8c8"),
+            "SAVED": ("GOLDEN SAVED", "#123c27", "#38d27b"),
+            "SETUP": ("ACTION REQUIRED", "#5a4214", "#f2c14e"),
+            "ERROR": ("CHECK SYSTEM", "#541c25", "#ff6673"),
+        }
+        label, background, border = styles.get(state, styles["READY"])
+
+        if state != self._calibration_summary_state:
+            self.lbl_cal_state.setText(self._tr(label))
+            self.lbl_cal_state.setStyleSheet(
+                f"font-size: 25px; font-weight: 1000; color: {border};"
+            )
+            self.status_summary.setStyleSheet(
+                "QFrame#calibrationStatusSummary "
+                f"{{ background: {background}; border: 2px solid {border}; border-radius: 12px; }}"
+            )
+            self._calibration_summary_state = state
+
+    def _golden_reference_text(self) -> str:
+        recipe = getattr(self.engine, "recipe", None)
+        cfg = getattr(recipe, "cfg", None)
+        if not isinstance(cfg, dict):
+            return "No product loaded"
+
+        expected = cfg.get("expected_notch_frame")
+        if isinstance(expected, dict):
+            try:
+                x = float(expected.get("frame_dx", expected.get("dx")))
+                y = float(expected.get("frame_dy", expected.get("dy")))
+                angle = float(expected.get("relative_angle"))
+                return self._format_coordinates_mm(x, y, angle, label="Notch")
+            except (TypeError, ValueError):
+                pass
+
+        center = cfg.get("expected_center")
+        angle = cfg.get("expected_angle")
+        try:
+            return self._format_coordinates_mm(
+                float(center[0]), float(center[1]), float(angle), label="Fallback center"
+            )
+        except (TypeError, ValueError, IndexError):
+            return "Not set — capture a golden reference after the live reading is stable"
+
+    def _tr(self, text: str) -> str:
+        localizer = getattr(self, "localizer", None)
+        return localizer.tr(text) if localizer is not None else str(text)
+
+    def retranslate_ui(self):
+        """Repaint the operator-facing calibration labels in the selected language."""
+        localizer = getattr(self, "localizer", None)
+        if localizer is None:
+            return
+        localizer.apply_widget_text(self)
+        self.lbl_cfg_status.setText(self.lbl_cfg_status._source_text)
+        state = self._calibration_summary_state or "READY"
+        self._calibration_summary_state = ""
+        self._set_calibration_summary_state(state)
+        self.lbl_cal_golden.setText(self._tr(self._golden_reference_text()))
+
+    def _format_coordinates_mm(self, x_px, y_px, angle_deg, *, label: str) -> str:
+        """Format coordinate values in operator units, never pixels."""
+        recipe = getattr(self.engine, "recipe", None)
+        cfg = getattr(recipe, "cfg", None)
+        px_per_mm = self._get_saved_px_per_mm(cfg) if isinstance(cfg, dict) else None
+
+        try:
+            angle_text = f"Angle: {float(angle_deg):.2f} deg"
+        except (TypeError, ValueError):
+            angle_text = "Angle: —"
+
+        prefix = f"{label} " if label else ""
+
+        if px_per_mm is None:
+            return f"{prefix}X/Y: scale required for mm display  |  {angle_text}"
+
+        try:
+            return (
+                f"{prefix}X: {float(x_px) / px_per_mm:.3f} mm  |  "
+                f"Y: {float(y_px) / px_per_mm:.3f} mm  |  {angle_text}"
+            )
+        except (TypeError, ValueError, ZeroDivisionError):
+            return f"{prefix}X/Y: unavailable  |  {angle_text}"
+
+    def _sync_calibration_summary_from_status(self, text: str):
+        raw = str(text or "Status: READY").strip()
+        detail = re.sub(r"^status\s*:\s*", "", raw, flags=re.IGNORECASE).strip()
+        upper = detail.upper()
+
+        if "GOLDEN + EXPECTED SAVED" in upper:
+            state = "SAVED"
+        elif "CAMERA" in upper or "ENGINE" in upper or "JSON" in upper:
+            state = "ERROR"
+        elif "FAIL" in upper or "NO FRAME" in upper or "NO PRODUCT" in upper or "ENTER" in upper:
+            state = "SETUP"
+        elif "PREVIEW RUNNING" in upper:
+            state = "LIVE"
+        elif "SEARCH" in upper:
+            state = "SEARCH"
+        else:
+            state = "READY"
+
+        self._set_calibration_summary_state(state)
+        if not self._timer.isActive() or self._last_engine_out is None:
+            self.lbl_cal_reading.setText(detail or "Ready to calibrate")
+        self.lbl_cal_golden.setText(self._golden_reference_text())
+
+    def _update_live_calibration_reading(self, out):
+        """Show the live notch-frame coordinates beside the saved golden ones."""
+        stab_info = getattr(out, "stab_info", None)
+        center_rel = getattr(out, "center_rel", None)
+        angle = getattr(out, "angle", None)
+        roi_live = getattr(out, "roi_live", None)
+
+        if center_rel is None or angle is None or roi_live is None:
+            self._set_calibration_summary_state("SEARCH")
+            self.lbl_cal_reading.setText("Searching for a stable baseplate center and notch frame")
+            self.lbl_cal_golden.setText(self._golden_reference_text())
+            return
+
+        try:
+            center_abs = (
+                float(roi_live[0]) + float(center_rel[0]),
+                float(roi_live[1]) + float(center_rel[1]),
+            )
+        except (TypeError, ValueError, IndexError):
+            center_abs = None
+
+        notch_frame = self._get_live_notch_frame_from_stab(stab_info)
+        local_xy = self._point_to_live_notch_frame(center_abs, notch_frame) if center_abs and notch_frame else None
+
+        if local_xy is not None:
+            notch_angle = self._notch_frame_angle_deg(notch_frame)
+            relative_angle = self._angle_diff_deg(float(angle), float(notch_angle))
+            self.lbl_cal_reading.setText(self._format_coordinates_mm(
+                local_xy[0], local_xy[1], relative_angle, label="Notch"
+            ))
+        else:
+            self.lbl_cal_reading.setText(
+                self._format_coordinates_mm(
+                    center_abs[0], center_abs[1], float(angle), label="Baseplate"
+                ) + "\nWaiting for notch-frame coordinates"
+            )
+
+        output_state = str(getattr(out, "state", "") or "").upper()
+        state_map = {
+            "PASS": "ALIGNED",
+            "TRACK": "VERIFYING",
+            "FAIL": "OFFSET",
+            "SEARCH": "SEARCH",
+            "SETUP": "SETUP",
+        }
+        self._set_calibration_summary_state(state_map.get(output_state, "LIVE"))
+        self.lbl_cal_golden.setText(self._golden_reference_text())
 
     # -------------------------
     # Build UI
@@ -321,7 +575,7 @@ class CalibrationPage(QWidget):
         self.lbl_expected.setWordWrap(True)
         vb.addWidget(self.lbl_expected)
 
-        self.lbl_cfg_status = QLabel("Status: IDLE")
+        self.lbl_cfg_status = _StatusLabel("Status: IDLE")
         self.lbl_cfg_status.setStyleSheet("font-size: 13px; font-weight: 900;")
         self.lbl_cfg_status.setWordWrap(True)
         vb.addWidget(self.lbl_cfg_status)
@@ -361,6 +615,90 @@ class CalibrationPage(QWidget):
         self.grp_view.buttonClicked.connect(self._apply_view_mode)
         self.btn_preview_start.clicked.connect(self.start_preview)
         self.btn_preview_stop.clicked.connect(self.stop_preview)
+
+    def _build_tolerance_group(self):
+        gb = QGroupBox("PASS / FAIL Tolerances")
+        gb.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        vb = QVBoxLayout(gb)
+        vb.setSpacing(6)
+
+        note = QLabel(
+            "Enter physical X and Y limits in millimetres. The app saves those "
+            "recipe limits and converts them to the pixels used by inspection."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 12px; color: #aeb3c2;")
+        vb.addWidget(note)
+
+        self.sp_tol_x = QDoubleSpinBox()
+        self.sp_tol_x.setRange(0.0, 100.0)
+        self.sp_tol_x.setSingleStep(0.01)
+        self.sp_tol_x.setDecimals(3)
+        self.sp_tol_x.setSuffix(" mm")
+        self.sp_tol_x.setSpecialValueText("Not set")
+        _add_param(
+            vb,
+            "X position limit (mm)",
+            self.sp_tol_x,
+            _tip_html(
+                title="X position tolerance",
+                what="This is the maximum allowed left/right physical error from the saved golden reference.",
+                increase="More left/right movement is accepted before the recipe fails.",
+                decrease="The recipe becomes stricter about left/right placement.",
+                typical="Use the tolerance defined by the product drawing or quality plan.",
+                step="Change in measured increments, usually 0.01 mm.",
+                warning="This is recipe-specific. The app converts it to pixels from the saved baseplate scale.",
+            ),
+        )
+
+        self.sp_tol_y = QDoubleSpinBox()
+        self.sp_tol_y.setRange(0.0, 100.0)
+        self.sp_tol_y.setSingleStep(0.01)
+        self.sp_tol_y.setDecimals(3)
+        self.sp_tol_y.setSuffix(" mm")
+        self.sp_tol_y.setSpecialValueText("Not set")
+        _add_param(
+            vb,
+            "Y position limit (mm)",
+            self.sp_tol_y,
+            _tip_html(
+                title="Y position tolerance",
+                what="This is the maximum allowed up/down physical error from the saved golden reference.",
+                increase="More up/down movement is accepted before the recipe fails.",
+                decrease="The recipe becomes stricter about up/down placement.",
+                typical="Use the tolerance defined by the product drawing or quality plan.",
+                step="Change in measured increments, usually 0.01 mm.",
+                warning="This is recipe-specific. The app converts it to pixels from the saved baseplate scale.",
+            ),
+        )
+
+        self.sp_tol_angle = QDoubleSpinBox()
+        self.sp_tol_angle.setRange(0.0, 180.0)
+        self.sp_tol_angle.setSingleStep(0.1)
+        self.sp_tol_angle.setDecimals(2)
+        self.sp_tol_angle.setSuffix(" deg")
+        self.sp_tol_angle.setSpecialValueText("Not set")
+        _add_param(
+            vb,
+            "Angle limit",
+            self.sp_tol_angle,
+            _tip_html(
+                title="Angle tolerance",
+                what="This is the maximum allowed rotation error from the saved golden reference.",
+                increase="More rotation is accepted before the recipe fails.",
+                decrease="The recipe becomes stricter about rotation.",
+                typical="Use the tolerance defined by the product drawing or quality plan.",
+                step="Change in small measured increments, usually 0.1 degree.",
+                warning="This is recipe-specific. It is not a global app default.",
+            ),
+        )
+
+        self.lbl_tolerance = QLabel("Tolerances: enter all three limits")
+        self.lbl_tolerance.setWordWrap(True)
+        self.lbl_tolerance.setStyleSheet("font-size: 12px; font-weight: 800; color: #f2c14e;")
+        vb.addWidget(self.lbl_tolerance)
+
+        self.controls_layout.addWidget(gb)
 
     def _build_baseplate_tuning_group(self):
         gb = QGroupBox("Baseplate Tuning + Scale")
@@ -700,6 +1038,9 @@ class CalibrationPage(QWidget):
     # -------------------------
     def _connect_tuning_signals(self):
         widgets = [
+            self.sp_tol_x,
+            self.sp_tol_y,
+            self.sp_tol_angle,
             self.sp_baseplate_w_mm,
             self.sp_baseplate_h_mm,
             self.sp_canny_low,
@@ -729,6 +1070,7 @@ class CalibrationPage(QWidget):
             return
 
         self._live_dirty = True
+        self._update_tolerance_status()
         self.lbl_live.setText("Live: applying unsaved parameter changes...")
         self.lbl_save.setText("Saved: unsaved changes")
         self._live_apply_timer.start(120)
@@ -755,6 +1097,7 @@ class CalibrationPage(QWidget):
                 pass
 
             self.lbl_live.setText("Live: current parameters are being used by preview")
+            self.configurationChanged.emit()
         except Exception as e:
             self.lbl_live.setText(f"Live: apply failed: {e}")
 
@@ -884,6 +1227,7 @@ class CalibrationPage(QWidget):
             return
 
         self._last_engine_out = out
+        self._update_live_calibration_reading(out)
 
         mode = (self.engine.settings.view_mode or "OVERLAY").upper()
 
@@ -917,6 +1261,13 @@ class CalibrationPage(QWidget):
     def _products_root(self) -> Path:
         return Path(self.recipe_manager.recipes_root)
 
+    def _recipe_config_dir(self, recipe) -> Path:
+        """Return the exact directory backing the recipe currently being edited."""
+        config_dir = str(getattr(recipe, "config_dir", "") or "").strip()
+        if config_dir:
+            return Path(config_dir)
+        return Path(recipe.recipe_dir)
+
     def _base_cfg_for_new_product(self) -> dict:
         if self.engine.recipe is not None:
             cfg = dict(self.engine.recipe.cfg)
@@ -934,7 +1285,6 @@ class CalibrationPage(QWidget):
 
         cfg.setdefault("expected_center", [50.0, 50.0])
         cfg.setdefault("expected_angle", 0.0)
-        cfg.setdefault("tolerance_px", {"x": 10, "y": 10, "angle": 5})
 
         cfg.setdefault("baseplate_width_mm", 20.4)
         cfg.setdefault("baseplate_height_mm", 26.5)
@@ -971,7 +1321,7 @@ class CalibrationPage(QWidget):
             return bool(cv2.imwrite(str(golden_dst), self.engine.recipe.golden_bgr))
 
         if self.engine.recipe is not None:
-            src_dir = Path(self.engine.recipe.recipe_dir)
+            src_dir = self._recipe_config_dir(self.engine.recipe)
             if _copy_first_existing_golden(src_dir, dst_dir):
                 return True
 
@@ -1098,6 +1448,8 @@ class CalibrationPage(QWidget):
     def _cfg_with_current_tuning(self, cfg: dict) -> dict:
         cfg = dict(cfg)
 
+        cfg = self._apply_tolerances_to_cfg(cfg)
+
         bw = float(self.sp_baseplate_w_mm.value())
         bh = float(self.sp_baseplate_h_mm.value())
 
@@ -1133,6 +1485,82 @@ class CalibrationPage(QWidget):
 
         return cfg
 
+    def _current_tolerances(self):
+        """Return operator-entered limits: millimetres, millimetres, degrees."""
+        values = {
+            "x": float(self.sp_tol_x.value()),
+            "y": float(self.sp_tol_y.value()),
+            "angle": float(self.sp_tol_angle.value()),
+        }
+
+        if all(np.isfinite(v) and v > 0.0 for v in values.values()):
+            return values
+
+        return None
+
+    def _apply_tolerances_to_cfg(self, cfg: dict, *, px_per_mm=None) -> dict:
+        """Persist physical limits and cache their pixel conversion for the engine."""
+        cfg = dict(cfg)
+        tolerances_mm = self._current_tolerances()
+
+        if tolerances_mm is None:
+            # A recipe without all three limits must not silently inherit a
+            # global default. The engine will report that setup is incomplete.
+            cfg.pop("tolerance_mm", None)
+            cfg.pop("tolerance_px", None)
+            return cfg
+
+        cfg["tolerance_mm"] = dict(tolerances_mm)
+
+        scale = px_per_mm
+        try:
+            scale = float(scale) if scale is not None else self._get_saved_px_per_mm(cfg)
+        except (TypeError, ValueError):
+            scale = None
+
+        if scale is None or not np.isfinite(scale) or scale <= 0.0:
+            # Keep the physical limits. A live frame can still supply the
+            # conversion, and the next captured scale will populate this cache.
+            cfg.pop("tolerance_px", None)
+            return cfg
+
+        cfg["tolerance_px"] = {
+            "x": float(tolerances_mm["x"] * scale),
+            "y": float(tolerances_mm["y"] * scale),
+            "angle": float(tolerances_mm["angle"]),
+        }
+        return cfg
+
+    def _update_tolerance_status(self):
+        tolerances_mm = self._current_tolerances()
+
+        if tolerances_mm is None:
+            self.lbl_tolerance.setText("Tolerances: enter all three limits before PASS / FAIL is enabled")
+            self.lbl_tolerance.setStyleSheet("font-size: 12px; font-weight: 800; color: #f2c14e;")
+            return
+
+        recipe = getattr(self.engine, "recipe", None)
+        cfg = getattr(recipe, "cfg", None)
+        px_per_mm = self._get_saved_px_per_mm(cfg) if isinstance(cfg, dict) else None
+
+        if px_per_mm is None:
+            self.lbl_tolerance.setText(
+                "Tolerances: "
+                f"X {tolerances_mm['x']:.3f}mm, Y {tolerances_mm['y']:.3f}mm, "
+                f"angle {tolerances_mm['angle']:.2f}deg — capture baseplate scale to save pixel limits"
+            )
+            self.lbl_tolerance.setStyleSheet("font-size: 12px; font-weight: 800; color: #f2c14e;")
+            return
+
+        self.lbl_tolerance.setText(
+            "Tolerances: recipe limits active "
+            f"(X {tolerances_mm['x']:.3f}mm, Y {tolerances_mm['y']:.3f}mm, "
+            f"angle {tolerances_mm['angle']:.2f}deg; "
+            f"internal X {tolerances_mm['x'] * px_per_mm:.2f}px, "
+            f"Y {tolerances_mm['y'] * px_per_mm:.2f}px)"
+        )
+        self.lbl_tolerance.setStyleSheet("font-size: 12px; font-weight: 800; color: #7ee787;")
+
     def _get_cfg_baseplate_dims(self, cfg: dict):
         dims = cfg.get("baseplate_dimensions_mm")
 
@@ -1157,6 +1585,27 @@ class CalibrationPage(QWidget):
         try:
             cfg = self.engine.recipe.cfg
 
+            tol_mm = cfg.get("tolerance_mm")
+            tol_mm = tol_mm if isinstance(tol_mm, dict) else {}
+            tol_px = cfg.get("tolerance_px")
+            tol_px = tol_px if isinstance(tol_px, dict) else {}
+            px_per_mm = self._get_saved_px_per_mm(cfg)
+
+            for widget, key in ((self.sp_tol_x, "x"), (self.sp_tol_y, "y")):
+                try:
+                    value = float(tol_mm.get(key, 0.0))
+                    if (not np.isfinite(value) or value <= 0.0) and px_per_mm is not None:
+                        value = float(tol_px.get(key, 0.0)) / float(px_per_mm)
+                    widget.setValue(value if np.isfinite(value) and value > 0.0 else 0.0)
+                except Exception:
+                    widget.setValue(0.0)
+
+            try:
+                angle = float(tol_mm.get("angle", tol_px.get("angle", 0.0)))
+                self.sp_tol_angle.setValue(angle if np.isfinite(angle) and angle > 0.0 else 0.0)
+            except Exception:
+                self.sp_tol_angle.setValue(0.0)
+
             bw, bh = self._get_cfg_baseplate_dims(cfg)
             self.sp_baseplate_w_mm.setValue(float(bw))
             self.sp_baseplate_h_mm.setValue(float(bh))
@@ -1177,6 +1626,7 @@ class CalibrationPage(QWidget):
             self.sp_notch_side_band.setValue(float(cfg.get("notch_side_band_frac", 0.35)))
             self.sp_roi_extra_pad.setValue(int(cfg.get("notch_frame_roi_extra_pad", cfg.get("baseplate_roi_extra_pad", 6))))
 
+            self._update_tolerance_status()
             self.lbl_save.setText("Saved: loaded from product JSON")
             self.lbl_live.setText("Live: product JSON parameters loaded")
         finally:
@@ -1240,10 +1690,12 @@ class CalibrationPage(QWidget):
         if isinstance(enf, dict):
             try:
                 self.lbl_expected.setText(
-                    "Expected notch-frame: "
-                    f"dx={float(enf.get('dx', 0.0)):.1f}px, "
-                    f"dy={float(enf.get('dy', 0.0)):.1f}px, "
-                    f"relTheta={float(enf.get('relative_angle', 0.0)):.1f}"
+                    "Expected notch-frame: " + self._format_coordinates_mm(
+                        float(enf.get("frame_dx", enf.get("dx", 0.0))),
+                        float(enf.get("frame_dy", enf.get("dy", 0.0))),
+                        float(enf.get("relative_angle", 0.0)),
+                        label="",
+                    )
                 )
                 return
             except Exception:
@@ -1258,7 +1710,9 @@ class CalibrationPage(QWidget):
 
         try:
             self.lbl_expected.setText(
-                f"Expected fallback: cx={float(c[0]):.1f}, cy={float(c[1]):.1f}, angle={float(a):.1f}"
+                "Expected fallback: " + self._format_coordinates_mm(
+                    float(c[0]), float(c[1]), float(a), label=""
+                )
             )
         except Exception:
             self.lbl_expected.setText("Expected: invalid")
@@ -1487,7 +1941,7 @@ class CalibrationPage(QWidget):
             return
 
         recipe = self.engine.recipe
-        product_dir = Path(recipe.recipe_dir)
+        product_dir = self._recipe_config_dir(recipe)
         product_dir.mkdir(parents=True, exist_ok=True)
 
         cfg = dict(recipe.cfg)
@@ -1594,6 +2048,7 @@ class CalibrationPage(QWidget):
         scale = self._scale_from_live_stab(stab_info)
         if scale is not None:
             cfg = self._write_baseplate_scale_to_cfg(cfg, scale)
+        cfg = self._apply_tolerances_to_cfg(cfg)
 
         golden_path = product_dir / "golden.png"
         ok = cv2.imwrite(str(golden_path), self._last_frame_bgr)
@@ -1605,7 +2060,10 @@ class CalibrationPage(QWidget):
         try:
             _safe_write_json(str(product_dir / "golden_config.json"), cfg)
 
-            reloaded = self.recipe_manager.load(recipe.name)
+            reloaded = self.recipe_manager.load(
+                recipe.name,
+                config_name=recipe.config_name if recipe.is_legacy else None,
+            )
             self.engine.set_recipe(reloaded)
             self._load_tuning_from_cfg()
             self._update_expected_label()
@@ -1614,19 +2072,13 @@ class CalibrationPage(QWidget):
             try:
                 self._force_one_clean_stabilizer_tick()
                 self._last_engine_out = self.engine.process_frame(self._last_frame_bgr)
+                self._update_live_calibration_reading(self._last_engine_out)
             except Exception:
                 pass
 
-            if scale is not None and "px_per_mm" in cfg:
-                scale_txt = f" scale={float(cfg['px_per_mm']):.3f}px/mm"
-            else:
-                scale_txt = " scale=kept/unchanged"
-
             self.lbl_cfg_status.setText(
-                "Status: GOLDEN + EXPECTED SAVED ABS-NOTCH  "
-                f"dx={frame_dx:.1f}px dy={frame_dy:.1f}px "
-                f"relTheta={relative_angle:.1f}"
-                f"{scale_txt}"
+                "Status: GOLDEN + EXPECTED SAVED  "
+                + self._format_coordinates_mm(frame_dx, frame_dy, relative_angle, label="Notch")
             )
 
         except Exception as e:
@@ -1665,7 +2117,11 @@ class CalibrationPage(QWidget):
                         "baseplate_height_mm": float(cfg["baseplate_height_mm"]),
                     }
 
-        product_dir = Path(recipe.recipe_dir)
+        # Use the freshest saved or live-derived scale to refresh the pixel
+        # cache from the operator-entered millimetre limits.
+        cfg = self._apply_tolerances_to_cfg(cfg)
+
+        product_dir = self._recipe_config_dir(recipe)
         product_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -1677,7 +2133,11 @@ class CalibrationPage(QWidget):
             self._live_dirty = False
             self._update_expected_label()
 
-            if scale is not None and "px_per_mm" in cfg:
+            if self._current_tolerances() is None:
+                self.lbl_save.setText(
+                    "Saved: golden_config.json — enter all three tolerances before PASS / FAIL is enabled"
+                )
+            elif scale is not None and "px_per_mm" in cfg:
                 self.lbl_save.setText(f"Saved: golden_config.json  scale={float(cfg['px_per_mm']):.3f}px/mm")
             else:
                 self.lbl_save.setText("Saved: golden_config.json  scale=kept/unchanged")

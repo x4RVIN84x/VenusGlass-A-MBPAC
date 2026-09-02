@@ -10,7 +10,7 @@ import roi_stablizer
 from detector import detect_baseplate
 
 from hmi_app.core.models import Recipe, EngineSettings, QCFrameOutput
-from hmi_app.core.overlay import draw_stab_debug, draw_baseplate_overlay, draw_status_box
+from hmi_app.core.overlay import draw_stab_debug, draw_baseplate_overlay
 
 
 # ----------------------------
@@ -89,6 +89,57 @@ def _safe_float(v, default=None):
         return default
 
     return x
+
+
+def _recipe_tolerances(cfg: Dict[str, Any], px_per_mm=None):
+    """Return complete, positive pixel tolerances or None when setup is incomplete.
+
+    Recipes keep the operator-entered X/Y limits in millimetres.  The vision
+    comparison remains pixel based, so convert those physical limits here using
+    the recipe's calibrated scale.  ``tolerance_px`` remains a compatibility
+    cache for legacy launchers and older recipes.
+    """
+    if not isinstance(cfg, dict):
+        return None
+
+    raw_mm = cfg.get("tolerance_mm")
+    if isinstance(raw_mm, dict):
+        values_mm = {
+            "x": _safe_float(raw_mm.get("x"), None),
+            "y": _safe_float(raw_mm.get("y"), None),
+            "angle": _safe_float(raw_mm.get("angle"), None),
+        }
+
+        if any(value is None or value <= 0.0 for value in values_mm.values()):
+            return None
+
+        scale = _safe_float(px_per_mm, None)
+        if scale is None or scale <= 0.0:
+            scale = _saved_px_per_mm(cfg)
+
+        if scale is None or scale <= 0.0:
+            return None
+
+        return {
+            "x": float(values_mm["x"] * scale),
+            "y": float(values_mm["y"] * scale),
+            "angle": float(values_mm["angle"]),
+        }
+
+    raw = cfg.get("tolerance_px")
+    if not isinstance(raw, dict):
+        return None
+
+    values = {
+        "x": _safe_float(raw.get("x"), None),
+        "y": _safe_float(raw.get("y"), None),
+        "angle": _safe_float(raw.get("angle"), None),
+    }
+
+    if any(value is None or value <= 0.0 for value in values.values()):
+        return None
+
+    return values
 
 
 # ----------------------------
@@ -852,14 +903,19 @@ class QCPreviewEngine:
         # ----------------------------
         golden_center = tuple(cfg.get("expected_center", (0.0, 0.0)))
         golden_angle = float(cfg.get("expected_angle", 0.0))
-        tol = cfg.get("tolerance_px", {"x": 10, "y": 10, "angle": 5})
-
-        tol_x = float(tol.get("x", 10))
-        tol_y = float(tol.get("y", 10))
-        tol_a = float(tol.get("angle", 5))
+        tolerance_scale = _saved_px_per_mm(cfg)
+        if tolerance_scale is None and isinstance(frame_scale_info, dict):
+            tolerance_scale = _safe_float(frame_scale_info.get("px_per_mm"), None)
+        tol = _recipe_tolerances(cfg, px_per_mm=tolerance_scale)
+        tolerance_configured = tol is not None
+        tol_x = None if tol is None else float(tol["x"])
+        tol_y = None if tol is None else float(tol["y"])
+        tol_a = None if tol is None else float(tol["angle"])
 
         state = "SEARCH"
         text = "SEARCHING"
+        status_metrics = None
+        status_stability = None
 
         sx = None
         sy = None
@@ -927,28 +983,87 @@ class QCPreviewEngine:
                 dy_px = abs(float(sy))
                 dtheta = abs(float(stheta))
 
-            ok_all = (dx_px <= tol_x) and (dy_px <= tol_y) and (dtheta <= tol_a)
-
-            if ok_all:
-                self._stable_have = min(int(self.settings.stable_need), self._stable_have + 1)
+            if not tolerance_configured:
+                # Passing without an explicitly saved recipe limit is unsafe.
+                self._stable_have = 0
+                state = "SETUP"
+                text = "TOLERANCES REQUIRED"
             else:
-                self._stable_have = max(0, self._stable_have - 1)
+                ok_all = (dx_px <= tol_x) and (dy_px <= tol_y) and (dtheta <= tol_a)
 
-            disp_abs = _px_to_display(dx_px, dy_px, cfg, frame_scale_info)
-            unit = disp_abs["unit"]
+                if ok_all:
+                    self._stable_have = min(int(self.settings.stable_need), self._stable_have + 1)
+                else:
+                    self._stable_have = max(0, self._stable_have - 1)
 
-            if ok_all and self._stable_have >= int(self.settings.stable_need):
-                state = "PASS"
-                text = f"PASS  dx={disp_abs['dx']:.2f}{unit} dy={disp_abs['dy']:.2f}{unit} dTheta={dtheta:.1f}"
-            else:
-                state = "TRACK"
-                text = f"TRACK {self._stable_have}/{int(self.settings.stable_need)}  dx={disp_abs['dx']:.2f}{unit} dy={disp_abs['dy']:.2f}{unit} dTheta={dtheta:.1f}"
+                disp_abs = _px_to_display(dx_px, dy_px, cfg, frame_scale_info)
+                disp_tol = _px_to_display(tol_x, tol_y, cfg, frame_scale_info)
+                signed_disp = _px_to_display(float(sx), float(sy), cfg, frame_scale_info)
+                unit = disp_abs["unit"]
+
+                def _direction(value):
+                    if float(value) > 1e-9:
+                        return "positive"
+                    if float(value) < -1e-9:
+                        return "negative"
+                    return "zero"
+
+                status_metrics = [
+                    {
+                        "label": "X OFFSET",
+                        "value": f"{disp_abs['dx']:.2f} {unit}",
+                        "limit": f"LIMIT {disp_tol['dx']:.2f} {unit}",
+                        "passed": dx_px <= tol_x,
+                        "direction": _direction(sx),
+                        "signed_measurement": float(sx),
+                        "signed_value": f"{signed_disp['dx']:.2f} {unit}",
+                    },
+                    {
+                        "label": "Y OFFSET",
+                        "value": f"{disp_abs['dy']:.2f} {unit}",
+                        "limit": f"LIMIT {disp_tol['dy']:.2f} {unit}",
+                        "passed": dy_px <= tol_y,
+                        "direction": _direction(sy),
+                        "signed_measurement": float(sy),
+                        "signed_value": f"{signed_disp['dy']:.2f} {unit}",
+                    },
+                    {
+                        "label": "ANGLE",
+                        "value": f"{dtheta:.2f} deg",
+                        "limit": f"LIMIT {tol_a:.2f} deg",
+                        "passed": dtheta <= tol_a,
+                        "direction": _direction(stheta),
+                        "signed_measurement": float(stheta),
+                        "signed_value": f"{float(stheta):.2f} deg",
+                    },
+                ]
+                status_stability = (self._stable_have, int(self.settings.stable_need))
+
+                if not ok_all:
+                    state = "FAIL"
+                    text = "OUTSIDE RECIPE LIMITS"
+                elif self._stable_have >= int(self.settings.stable_need):
+                    state = "PASS"
+                    text = "WITHIN RECIPE LIMITS"
+                else:
+                    state = "TRACK"
+                    text = "VERIFYING POSITION"
 
         # ----------------------------
         # Store operator guidance in stab_info
         # ----------------------------
         if not isinstance(self._stab_info, dict):
             self._stab_info = {}
+
+        # The Auto page owns the operator result panel.  Keep the compact
+        # measurements in the output data instead of covering the camera feed
+        # with status cards.
+        if status_metrics is not None:
+            self._stab_info["inspection_metrics"] = status_metrics
+            self._stab_info["inspection_stability"] = status_stability
+        else:
+            self._stab_info.pop("inspection_metrics", None)
+            self._stab_info.pop("inspection_stability", None)
 
         if center_abs is not None:
             self._stab_info["current_baseplate_center_abs"] = [
@@ -1100,19 +1215,6 @@ class QCPreviewEngine:
                 contour_rel,
                 roi_poly=self._roi_live_poly,
             )
-
-        draw_status_box(overlay, text, state=state)
-
-        bottom = (
-            f"FPS: {self._fps:.1f} | "
-            f"Recipe: {self.recipe.name} | "
-            f"Config: {getattr(self.recipe, 'config_name', 'legacy')}"
-        )
-
-        y = overlay.shape[0] - 18
-
-        cv2.putText(overlay, bottom, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 6, cv2.LINE_AA)
-        cv2.putText(overlay, bottom, (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
         out = QCFrameOutput(
             overlay_bgr=overlay,

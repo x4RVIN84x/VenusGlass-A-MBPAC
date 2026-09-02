@@ -1,21 +1,16 @@
 {
     "golden_image_path": "golden.png",
     "roi": [
-        299,
-        42,
-        657,
-        678
+        178,
+        0,
+        992,
+        720
     ],
     "expected_center": [
-        328.5577597303901,
-        343.5991796963741
+        485.4393815012297,
+        368.7996320262741
     ],
-    "expected_angle": -2.5419728504296746,
-    "tolerance_px": {
-        "x": 8.6,
-        "y": 8.6,
-        "angle": 2.0
-    },
+    "expected_angle": 1.2004670602622973,
     "registration_roi": [
         133,
         270,
@@ -23,10 +18,10 @@
         452
     ],
     "baseplate_roi": [
-        299,
-        42,
-        657,
-        678
+        178,
+        0,
+        992,
+        720
     ],
     "inner_border_lines_used": [
         "left",
@@ -60,7 +55,7 @@
     "canny_low": 58,
     "canny_high": 150,
     "blur_ksize": 7,
-    "clahe_clip": 1.5,
+    "clahe_clip": 0.4,
     "dilate_iter": 1,
     "close_iter": 2,
     "contrast_min": 5.0,
@@ -73,42 +68,42 @@
         "height": 26.5
     },
     "notch_blur_ksize": 21,
-    "notch_close_ksize": 11,
+    "notch_close_ksize": 23,
     "notch_open_ksize": 7,
     "notch_threshold_bias": 1.0,
     "notch_bottom_band_frac": 0.35,
-    "notch_side_band_frac": 0.35,
+    "notch_side_band_frac": 0.5,
     "notch_frame_roi_extra_pad": 6,
     "baseplate_roi_extra_pad": 6,
     "prefer_dark_region": true,
     "expected_notch_frame": {
         "coord_model": "bottom_mid_local_frame_abs",
         "capture_source": "absolute_baseplate_center_in_live_notch_frame",
-        "dx": 4.593704105429451,
-        "dy": 166.7939392783898,
-        "frame_dx": 4.593704105429451,
-        "frame_dy": 166.7939392783898,
-        "sidewall_dx": 4.593704105429451,
-        "sidewall_dy": 166.7939392783898,
-        "relative_angle": -2.123665007424413,
-        "notch_angle": -0.4183078430052614,
+        "dx": -9.657734789779637,
+        "dy": 171.1555959612951,
+        "frame_dx": -9.657734789779637,
+        "frame_dy": 171.1555959612951,
+        "sidewall_dx": -9.657734789779637,
+        "sidewall_dy": 171.1555959612951,
+        "relative_angle": 1.198476393416936,
+        "notch_angle": 0.001990666845361254,
         "baseplate_center_abs": [
-            627.5577597303901,
-            385.5991796963741
+            663.4393815012297,
+            368.7996320262741
         ],
         "live_roi_at_capture": [
-            299,
-            42,
-            657,
-            678
+            178,
+            0,
+            992,
+            720
         ]
     },
-    "px_per_mm": 3.7661853455809196,
-    "mm_per_px": 0.2655206550504364,
-    "baseplate_px_per_mm": 3.7661853455809196,
+    "px_per_mm": 3.9562134088254446,
+    "mm_per_px": 0.25276695078410566,
+    "baseplate_px_per_mm": 3.9562134088254446,
     "baseplate_scale": {
-        "px_per_mm": 3.7661853455809196,
-        "mm_per_px": 0.2655206550504364,
+        "px_per_mm": 3.9562134088254446,
+        "mm_per_px": 0.25276695078410566,
         "baseplate_width_mm": 20.4,
         "baseplate_height_mm": 26.5,
         "baseplate_dimensions_mm": {
@@ -119,6 +114,11 @@
     "tolerance_mm": {
         "x": 2.0,
         "y": 2.0,
+        "angle": 2.0
+    },
+    "tolerance_px": {
+        "x": 7.912426817650889,
+        "y": 7.912426817650889,
         "angle": 2.0
     }
 }

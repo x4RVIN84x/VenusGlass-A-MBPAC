@@ -133,12 +133,20 @@ class RecipeManager:
             raise FileNotFoundError(f"Recipe/product folder not found: {recipe_dir}")
 
         flat_cfg = os.path.join(recipe_dir, "golden_config.json")
+        configs = self.list_configs(recipe_name)
+
+        # A caller that explicitly selects a legacy configuration must get
+        # that configuration, even when the product also has a flat default.
+        # This makes calibration/save reload the same golden set it just edited.
+        requested = (config_name or "").strip()
+        if requested and requested in configs:
+            return True, recipe_dir, requested, os.path.join(recipe_dir, "configs", requested)
+
         if os.path.isfile(flat_cfg):
             return False, recipe_dir, recipe_name, recipe_dir
 
-        configs = self.list_configs(recipe_name)
         if configs:
-            chosen = (config_name or self.get_active_config_name(recipe_name) or configs[0]).strip()
+            chosen = (self.get_active_config_name(recipe_name) or configs[0]).strip()
             if chosen not in configs:
                 chosen = configs[0]
             return True, recipe_dir, chosen, os.path.join(recipe_dir, "configs", chosen)

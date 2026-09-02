@@ -41,6 +41,38 @@ REQ_W, REQ_H, REQ_FPS = 1280, 720, 30
 WIN = "LIVE QC PREVIEW"
 
 
+def _tolerances_px_from_cfg(cfg: dict):
+    """Resolve physical recipe limits into pixel limits for this legacy preview."""
+    if not isinstance(cfg, dict):
+        return None
+
+    raw_mm = cfg.get("tolerance_mm")
+    if isinstance(raw_mm, dict):
+        try:
+            scale = cfg.get("px_per_mm", cfg.get("baseplate_px_per_mm"))
+            if scale is None and isinstance(cfg.get("baseplate_scale"), dict):
+                scale = cfg["baseplate_scale"].get("px_per_mm")
+            scale = float(scale)
+            if scale <= 0:
+                return None
+            return {
+                "x": float(raw_mm["x"]) * scale,
+                "y": float(raw_mm["y"]) * scale,
+                "angle": float(raw_mm["angle"]),
+            }
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    raw_px = cfg.get("tolerance_px")
+    if not isinstance(raw_px, dict):
+        return None
+    try:
+        values = {key: float(raw_px[key]) for key in ("x", "y", "angle")}
+    except (TypeError, ValueError, KeyError):
+        return None
+    return values if all(value > 0 for value in values.values()) else None
+
+
 # ---------------------------------------------------------------------
 # Draw helpers
 # ---------------------------------------------------------------------
@@ -266,7 +298,9 @@ def main():
     roi_cfg = tuple(cfg["roi"])
     golden_center = tuple(cfg["expected_center"])
     golden_angle = float(cfg.get("expected_angle", 0.0))
-    tol = cfg.get("tolerance_px", {"x": 10, "y": 10, "angle": 5})
+    tol = _tolerances_px_from_cfg(cfg)
+    if tol is None:
+        raise ValueError("Recipe is missing valid tolerances; set X/Y in mm and angle in Calibration")
 
     golden_img_path = cfg["golden_image_path"]
     golden_img = cv2.imread(golden_img_path)

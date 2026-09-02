@@ -8,12 +8,13 @@ import cv2
 import numpy as np
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
     QVBoxLayout,
     QGroupBox,
+    QFrame,
+    QScrollArea,
     QLabel,
     QPushButton,
     QCheckBox,
@@ -25,16 +26,25 @@ from PySide6.QtWidgets import (
 from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
 from hmi_app.core.engine import QCPreviewEngine
+from hmi_app.core.report_store import ReportStore
 
 
 class AutoPage(QWidget):
     CONTROLS_FIXED_W = 430
 
-    def __init__(self, *, engine: QCPreviewEngine, cam: OpenCVCamera, parent=None):
+    def __init__(
+        self,
+        *,
+        engine: QCPreviewEngine,
+        cam: OpenCVCamera,
+        report_store: Optional[ReportStore] = None,
+        parent=None,
+    ):
         super().__init__(parent)
 
         self.engine = engine
         self.cam = cam
+        self.report_store = report_store
 
         self._running = False
         self._timer = QTimer(self)
@@ -48,25 +58,93 @@ class AutoPage(QWidget):
         self._track_alarm_flash_i = 0
         self._track_alarm_manual_hold = False
         self._track_alarm_last_reset_at = 0.0
+        self._alarm_sound_enabled = True
+        self._control_size_percent = 100
+        self._reduce_alarm_motion = False
+        self._report_terminal_recorded = False
+        self._baseplate_missing_since: Optional[float] = None
+        self._baseplate_missing_recorded = False
+        self._summary_state = "READY"
+        self._last_status_detail = "Select a product and press START"
 
-        root = QHBoxLayout(self)
+        root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(12)
+
         self.view = ImageView()
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        root.addWidget(self.view, 1)
+        content.addWidget(self.view, 1)
 
         self.controls_panel = QWidget()
         self.controls_panel.setFixedWidth(self.CONTROLS_FIXED_W)
         self.controls_panel.setMinimumWidth(self.CONTROLS_FIXED_W)
         self.controls_panel.setMaximumWidth(self.CONTROLS_FIXED_W)
         self.controls_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        root.addWidget(self.controls_panel, 0)
+        content.addWidget(self.controls_panel, 0)
 
         panel = QVBoxLayout(self.controls_panel)
         panel.setContentsMargins(0, 0, 0, 0)
         panel.setSpacing(10)
+
+        self.status_summary = QFrame()
+        self.status_summary.setObjectName("autoStatusSummary")
+        self.status_summary.setMinimumHeight(122)
+        summary_lay = QHBoxLayout(self.status_summary)
+        summary_lay.setContentsMargins(24, 14, 24, 14)
+        summary_lay.setSpacing(22)
+
+        state_column = QVBoxLayout()
+        state_title = QLabel("INSPECTION STATUS")
+        state_title.setAlignment(Qt.AlignCenter)
+        state_title.setStyleSheet("font-size: 12px; font-weight: 900; color: #c7ccd8;")
+        state_column.addWidget(state_title)
+
+        self.lbl_state = QLabel("READY")
+        self.lbl_state.setAlignment(Qt.AlignCenter)
+        state_column.addWidget(self.lbl_state)
+        summary_lay.addLayout(state_column, 2)
+
+        result_column = QVBoxLayout()
+        result_title = QLabel("CURRENT RESULT")
+        result_title.setAlignment(Qt.AlignCenter)
+        result_title.setStyleSheet("font-size: 12px; font-weight: 900; color: #c7ccd8;")
+        result_column.addWidget(result_title)
+
+        self.lbl_status = QLabel("Select a product and press START")
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setMinimumHeight(48)
+        result_column.addWidget(self.lbl_status)
+        summary_lay.addLayout(result_column, 5)
+
+        limits_column = QVBoxLayout()
+        limits_title = QLabel("ACCEPTANCE LIMITS")
+        limits_title.setAlignment(Qt.AlignCenter)
+        limits_title.setStyleSheet("font-size: 12px; font-weight: 900; color: #c7ccd8;")
+        limits_column.addWidget(limits_title)
+
+        self.lbl_tolerance = QLabel("No product loaded")
+        self.lbl_tolerance.setAlignment(Qt.AlignCenter)
+        self.lbl_tolerance.setWordWrap(True)
+        self.lbl_tolerance.setMinimumHeight(48)
+        self.lbl_tolerance.setStyleSheet(
+            "padding: 5px; font-size: 15px; font-weight: 800; color: #dbe4f2;"
+        )
+        limits_column.addWidget(self.lbl_tolerance)
+        summary_lay.addLayout(limits_column, 4)
+
+        root.addWidget(self.status_summary)
+        root.addLayout(content, 1)
+
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.controls_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         gb = QGroupBox("Auto Controls")
         vb = QVBoxLayout(gb)
@@ -100,15 +178,15 @@ class AutoPage(QWidget):
         self.chk_show_legacy_debug.setChecked(False)
         vb.addWidget(self.chk_show_legacy_debug)
 
-        self.chk_show_stab_text = QCheckBox("Stabilizer text")
-        self.chk_show_stab_text.setChecked(True)
+        self.chk_show_stab_text = QCheckBox("Show diagnostic text (advanced)")
+        self.chk_show_stab_text.setChecked(False)
         vb.addWidget(self.chk_show_stab_text)
 
         self.chk_show_bp = QCheckBox("Show baseplate contour + center")
         self.chk_show_bp.setChecked(True)
         vb.addWidget(self.chk_show_bp)
 
-        self.chk_alarm = QCheckBox("DRAMATIC lost-track alarm after 5s")
+        self.chk_alarm = QCheckBox("Enable visual lost-track alarm after 5s")
         self.chk_alarm.setChecked(True)
         self.chk_alarm.setStyleSheet("""
             QCheckBox {
@@ -155,12 +233,6 @@ class AutoPage(QWidget):
         self.sld_pad.setValue(120)
         vb.addWidget(self.sld_pad)
 
-        self.lbl_status = QLabel("Status: IDLE")
-        self.lbl_status.setStyleSheet("font-size: 14px; font-weight: 800;")
-        self.lbl_status.setWordWrap(False)
-        self.lbl_status.setFixedHeight(32)
-        vb.addWidget(self.lbl_status)
-
         self.btn_start = QPushButton("START")
         self.btn_stop = QPushButton("STOP")
         self.btn_stop.setEnabled(False)
@@ -168,22 +240,216 @@ class AutoPage(QWidget):
         vb.addWidget(self.btn_start)
         vb.addWidget(self.btn_stop)
 
-        panel.addWidget(gb)
-        panel.addStretch(1)
+        self.controls_scroll.setWidget(gb)
+        panel.addWidget(self.controls_scroll, 1)
 
         self.btn_start.clicked.connect(self.start)
         self.btn_stop.clicked.connect(self.stop)
 
         self._last_zoom_crop = None
         self._update_zoom_label()
+        self._update_tolerance_label()
+        self._set_summary_state("READY")
+        self._apply_control_size()
 
-    def _set_status(self, text: str):
-        fm = QFontMetrics(self.lbl_status.font())
-        self.lbl_status.setText(fm.elidedText(str(text), Qt.ElideRight, self.lbl_status.width()))
+    def _set_summary_state(self, state: str):
+        state = str(state or "READY").upper()
+        self._summary_state = state
+        styles = {
+            "PASS": ("PASS", "#123c27", "#38d27b"),
+            "TRACK": ("TRACK", "#5a3414", "#f2a23a"),
+            "SEARCH": ("SEARCHING", "#303744", "#aeb8c8"),
+            "SETUP": ("SETUP REQUIRED", "#5a4214", "#f2c14e"),
+            "FAIL": ("FAIL", "#541c25", "#ff6673"),
+            "RUNNING": ("RUNNING", "#173a58", "#66c6ff"),
+            "READY": ("READY", "#1f3d2b", "#78d89c"),
+            "IDLE": ("IDLE", "#2a2a2e", "#c7ccd8"),
+        }
+        label, background, border = styles.get(state, styles["READY"])
+        self.lbl_state.setText(self._tr(label))
+        self.lbl_state.setStyleSheet(f"font-size: 30px; font-weight: 1000; color: {border};")
+        self.lbl_status.setStyleSheet("font-size: 16px; font-weight: 800; color: #f3f5f8;")
+        self.status_summary.setStyleSheet(
+            f"QFrame#autoStatusSummary {{ background: {background}; border: 2px solid {border}; border-radius: 12px; }}"
+        )
+
+    def _state_from_text(self, text: str) -> str:
+        upper = str(text or "").upper()
+        if "PASS" in upper:
+            return "PASS"
+        if "TRACK" in upper or "VERIFY" in upper:
+            return "TRACK"
+        if "FAIL" in upper or "ERROR" in upper or "CAMERA" in upper:
+            return "FAIL"
+        if "SEARCH" in upper:
+            return "SEARCH"
+        if "SETUP" in upper or "NO PRODUCT" in upper:
+            return "SETUP"
+        if "RUNNING" in upper:
+            return "RUNNING"
+        if "IDLE" in upper or "STOPPED" in upper:
+            return "IDLE"
+        return "READY"
+
+    def _set_status(self, text: str, state: Optional[str] = None):
+        raw = str(text or "Status: READY").strip()
+        detail = re.sub(r"^status\s*:\s*", "", raw, flags=re.IGNORECASE).strip()
+        self._set_summary_state(state or self._state_from_text(detail))
+        self._last_status_detail = detail or "Ready for inspection"
+        self.lbl_status.setText(self._tr(self._last_status_detail))
+
+    def _tr(self, text: str) -> str:
+        localizer = getattr(self, "localizer", None)
+        return localizer.tr(text) if localizer is not None else str(text)
+
+    def _measurement_summary(self, stab_info) -> str:
+        if not isinstance(stab_info, dict):
+            return ""
+
+        metrics = stab_info.get("inspection_metrics")
+        if not isinstance(metrics, (list, tuple)):
+            return ""
+
+        values = []
+        for metric in metrics[:3]:
+            if not isinstance(metric, dict):
+                continue
+            label = str(metric.get("label", "")).replace(" OFFSET", "")
+            value = str(metric.get("value", ""))
+            if label and value:
+                values.append(f"{label}: {value}")
+
+        return "  |  ".join(values)
+
+    def _set_result_status(self, out):
+        state = str(getattr(out, "state", "") or "TRACK").upper()
+        stab_info = getattr(out, "stab_info", None)
+        summary = self._measurement_summary(stab_info)
+        messages = {
+            "PASS": "Within recipe limits",
+            "TRACK": "Verifying position",
+            "SEARCH": "Searching for the baseplate",
+            "SETUP": "Enter recipe tolerances in Calibration",
+            "FAIL": "Outside acceptance limits",
+        }
+        detail = messages.get(state, str(getattr(out, "status_text", "Inspection active") or "Inspection active"))
+        if summary:
+            detail = f"{detail}\n{summary}"
+        self._set_status(detail, state=state)
+
+    def _update_tolerance_label(self):
+        recipe = getattr(self.engine, "recipe", None)
+        cfg = getattr(recipe, "cfg", None)
+        if not isinstance(cfg, dict):
+            self.lbl_tolerance.setText(self._tr("Enter X, Y, and angle limits in Calibration"))
+            return
+
+        tolerance = cfg.get("tolerance_mm")
+        tolerance = tolerance if isinstance(tolerance, dict) else None
+
+        # Older recipe files may only have pixel limits. Present them in the
+        # operator-facing unit whenever a calibration scale is available.
+        if tolerance is None:
+            legacy_px = cfg.get("tolerance_px")
+            try:
+                scale = None
+                for key in ("px_per_mm", "baseplate_px_per_mm", "pixels_per_mm", "scale_px_per_mm"):
+                    value = float(cfg.get(key))
+                    if value > 0:
+                        scale = value
+                        break
+                if scale is None:
+                    for key in ("mm_per_px", "baseplate_mm_per_px", "scale_mm_per_px"):
+                        value = float(cfg.get(key))
+                        if value > 0:
+                            scale = 1.0 / value
+                            break
+                if scale is None and isinstance(cfg.get("baseplate_scale"), dict):
+                    scale = float(cfg["baseplate_scale"].get("px_per_mm"))
+                if scale is None or scale <= 0:
+                    raise ValueError
+                tolerance = {
+                    "x": float(legacy_px["x"]) / scale,
+                    "y": float(legacy_px["y"]) / scale,
+                    "angle": float(legacy_px["angle"]),
+                }
+            except (TypeError, ValueError, KeyError, ZeroDivisionError):
+                tolerance = None
+
+        if not isinstance(tolerance, dict):
+            self.lbl_tolerance.setText(self._tr("Enter X/Y limits in mm and angle limit in Calibration"))
+            return
+
+        try:
+            x = float(tolerance["x"])
+            y = float(tolerance["y"])
+            angle = float(tolerance["angle"])
+            if min(x, y, angle) <= 0:
+                raise ValueError
+            self.lbl_tolerance.setText(
+                f"X <= {x:.3f}mm     Y <= {y:.3f}mm\n"
+                f"ANGLE <= {angle:.2f}deg"
+            )
+        except Exception:
+            self.lbl_tolerance.setText(self._tr("Enter X/Y limits in mm and angle limit in Calibration"))
+
+    def refresh_recipe_summary(self):
+        self._update_tolerance_label()
+        if not self._running:
+            self._set_status("Status: READY")
+
+    def set_control_size_percent(self, percent: int):
+        self._control_size_percent = max(80, min(140, int(percent)))
+        self._apply_control_size()
+
+    def control_size_percent(self) -> int:
+        return int(self._control_size_percent)
+
+    def set_alarm_sound_enabled(self, enabled: bool):
+        self._alarm_sound_enabled = bool(enabled)
+
+    def alarm_sound_enabled(self) -> bool:
+        return bool(self._alarm_sound_enabled)
+
+    def set_reduce_alarm_motion(self, enabled: bool):
+        self._reduce_alarm_motion = bool(enabled)
+
+    def reduce_alarm_motion(self) -> bool:
+        return bool(self._reduce_alarm_motion)
+
+    def _apply_control_size(self):
+        percent = int(self._control_size_percent)
+        scale = float(percent) / 100.0
+        width = max(350, int(round(self.CONTROLS_FIXED_W * scale)))
+        button_h = max(34, int(round(36 * scale)))
+        font_px = max(12, int(round(12 * scale)))
+
+        self.controls_panel.setFixedWidth(width)
+        self.controls_panel.setStyleSheet(
+            f"QCheckBox, QLabel {{ font-size: {font_px}px; }} "
+            f"QGroupBox {{ font-size: {font_px}px; }} "
+            f"QPushButton {{ font-size: {font_px}px; }}"
+        )
+
+        for button in (self.btn_start, self.btn_stop, self.btn_reset_alarm):
+            button.setMinimumHeight(button_h)
+
+        self.lbl_state.setMinimumHeight(max(38, int(round(42 * scale))))
 
     def _update_zoom_label(self):
         z = float(self.sld_zoom.value()) / 100.0
-        self.lbl_zoom.setText(f"Display zoom: {z:.2f}x")
+        self.lbl_zoom.setText(f"{self._tr('Display zoom:')} {z:.2f}x")
+
+    def retranslate_ui(self):
+        """Refresh live Auto labels after a language preference change."""
+        localizer = getattr(self, "localizer", None)
+        if localizer is None:
+            return
+        localizer.apply_widget_text(self)
+        self._set_summary_state(self._summary_state)
+        self.lbl_status.setText(self._tr(self._last_status_detail))
+        self._update_zoom_label()
+        self._update_tolerance_label()
 
     def _set_engine_settings_from_ui(self):
         self.engine.settings.stab_every_n = int(self.sld_stab_n.value())
@@ -207,7 +473,7 @@ class AutoPage(QWidget):
         self._track_alarm_flash_i = 0
         self._track_alarm_manual_hold = False
         self._track_alarm_last_reset_at = 0.0
-        self.lbl_alarm.setText("Alarm: armed")
+        self.lbl_alarm.setText(self._tr("Alarm: armed"))
         self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 800; color: #d8d8d8;")
         self.btn_reset_alarm.setEnabled(False)
 
@@ -220,7 +486,7 @@ class AutoPage(QWidget):
         self._track_alarm_manual_hold = True
         self._track_alarm_last_reset_at = now
 
-        self.lbl_alarm.setText("Alarm: manually reset / monitoring again")
+        self.lbl_alarm.setText(self._tr("Alarm: manually reset / monitoring again"))
         self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 900; color: #66d9ff;")
         self.btn_reset_alarm.setEnabled(False)
 
@@ -232,6 +498,23 @@ class AutoPage(QWidget):
 
         if state == "PASS":
             return 999
+
+        # FAIL means the part was measured but is outside its recipe limit;
+        # it is not a lost camera track. SETUP similarly needs operator setup,
+        # not a flashing lost-track warning.
+        if state in {"FAIL", "SETUP"}:
+            return 999
+
+        if state == "TRACK":
+            stab_info = getattr(out, "stab_info", None)
+            if isinstance(stab_info, dict):
+                stability = stab_info.get("inspection_stability")
+                if isinstance(stability, (tuple, list)) and stability:
+                    try:
+                        return max(1, int(stability[0]))
+                    except Exception:
+                        pass
+            return 1
 
         try:
             text = str(getattr(out, "status_text", "") or "")
@@ -263,7 +546,7 @@ class AutoPage(QWidget):
     def _update_track_alarm(self, out) -> Tuple[bool, float]:
         if not self.chk_alarm.isChecked():
             self._reset_alarm_state()
-            self.lbl_alarm.setText("Alarm: disabled")
+            self.lbl_alarm.setText(self._tr("Alarm: disabled"))
             self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 800; color: #9a9a9a;")
             return False, 0.0
 
@@ -283,21 +566,21 @@ class AutoPage(QWidget):
         self._track_alarm_active = active
 
         if active:
-            self.lbl_alarm.setText(f"ALARM: lost track for {elapsed:.1f}s")
+            self.lbl_alarm.setText(self._tr(f"ALARM: lost track for {elapsed:.1f}s"))
             self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 1000; color: #ff4444;")
             self.btn_reset_alarm.setEnabled(True)
 
-            if now - self._track_alarm_last_beep >= 0.80:
+            if self._alarm_sound_enabled and now - self._track_alarm_last_beep >= 0.80:
                 self._track_alarm_last_beep = now
                 self._play_track_alarm_sound()
         else:
             remaining = max(0.0, float(self._track_alarm_after_s) - elapsed)
 
             if self._track_alarm_manual_hold:
-                self.lbl_alarm.setText(f"Alarm: reset acknowledged, re-arming in {remaining:.1f}s")
+                self.lbl_alarm.setText(self._tr(f"Alarm: reset acknowledged, re-arming in {remaining:.1f}s"))
                 self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 900; color: #66d9ff;")
             else:
-                self.lbl_alarm.setText(f"Alarm: warning in {remaining:.1f}s")
+                self.lbl_alarm.setText(self._tr(f"Alarm: warning in {remaining:.1f}s"))
                 self.lbl_alarm.setStyleSheet("font-size: 12px; font-weight: 800; color: #ffcc66;")
 
             self.btn_reset_alarm.setEnabled(self._track_alarm_since is not None)
@@ -360,19 +643,6 @@ class AutoPage(QWidget):
 
         out_img = cv2.resize(crop, (W, H), interpolation=cv2.INTER_LINEAR)
 
-        cv2.rectangle(out_img, (14, 14), (255, 54), (0, 0, 0), -1)
-        cv2.rectangle(out_img, (14, 14), (255, 54), (255, 255, 0), 1, cv2.LINE_AA)
-        cv2.putText(
-            out_img,
-            f"DISPLAY ZOOM {zoom:.2f}x",
-            (26, 42),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.62,
-            (255, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-
         return out_img
 
     def _draw_track_alarm_overlay(self, img, elapsed_s: float):
@@ -383,11 +653,11 @@ class AutoPage(QWidget):
         H, W = vis.shape[:2]
 
         self._track_alarm_flash_i += 1
-        flash = (self._track_alarm_flash_i // 6) % 2 == 0
+        flash = True if self._reduce_alarm_motion else (self._track_alarm_flash_i // 6) % 2 == 0
 
         red = np.zeros_like(vis)
         red[:, :, 2] = 255
-        alpha = 0.42 if flash else 0.24
+        alpha = 0.30 if self._reduce_alarm_motion else (0.42 if flash else 0.24)
         vis = cv2.addWeighted(red, alpha, vis, 1.0 - alpha, 0)
 
         scan_color = (0, 0, 80) if flash else (0, 0, 45)
@@ -690,6 +960,9 @@ class AutoPage(QWidget):
 
         self._running = True
         self._reset_alarm_state()
+        self._report_terminal_recorded = False
+        self._baseplate_missing_since = None
+        self._baseplate_missing_recorded = False
 
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -705,6 +978,9 @@ class AutoPage(QWidget):
         self._timer.stop()
 
         self._reset_alarm_state()
+        self._report_terminal_recorded = False
+        self._baseplate_missing_since = None
+        self._baseplate_missing_recorded = False
 
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
@@ -738,15 +1014,92 @@ class AutoPage(QWidget):
         # Zoom first so the alarm HUD stays full-screen on top of the zoomed feed.
         display = self._zoom_display_image(display, out)
 
-        # Draw operator guidance AFTER zoom so it never gets cropped away.
-        display = self._draw_operator_guidance_hud(display, out)
-
         alarm_on, alarm_elapsed = self._update_track_alarm(out)
+        self._record_baseplate_missing(out)
         if alarm_on:
             display = self._draw_track_alarm_overlay(display, alarm_elapsed)
 
         self.view.set_bgr(display)
-        self._set_status(out.status_text)
+        self._set_result_status(out)
+        self._record_report_result(out)
+
+    def _record_baseplate_missing(self, out):
+        """Record a persistent no-baseplate condition once per search episode."""
+        state = str(getattr(out, "state", "") or "").upper()
+        if state != "SEARCH":
+            self._baseplate_missing_since = None
+            self._baseplate_missing_recorded = False
+            return
+
+        now = time.monotonic()
+        if self._baseplate_missing_since is None:
+            self._baseplate_missing_since = now
+
+        if (
+            self.report_store is None
+            or self._baseplate_missing_recorded
+            or now - self._baseplate_missing_since < float(self._track_alarm_after_s)
+        ):
+            return
+
+        recipe = getattr(getattr(self.engine, "recipe", None), "name", "")
+        try:
+            self.report_store.record_result(
+                result="FAIL",
+                recipe=recipe,
+                cause="BASEPLATE NOT FOUND",
+                metrics=[{"label": "BASEPLATE NOT FOUND", "passed": False}],
+            )
+            self._baseplate_missing_recorded = True
+        except Exception:
+            # Reporting must never interrupt the live inspection loop.
+            pass
+
+    def _record_report_result(self, out):
+        """Persist one event when an inspection reaches a terminal result."""
+        if self.report_store is None:
+            return
+
+        state = str(getattr(out, "state", "") or "").upper()
+        if state == "SEARCH":
+            # A fresh search indicates the previous glass has left the frame.
+            self._report_terminal_recorded = False
+            return
+        if state not in {"PASS", "FAIL"}:
+            # Keep the latch during TRACK so one glass does not create multiple
+            # rows when its result briefly jitters between PASS and TRACK.
+            return
+
+        if self._report_terminal_recorded:
+            return
+
+        stab_info = getattr(out, "stab_info", None)
+        metrics = stab_info.get("inspection_metrics") if isinstance(stab_info, dict) else None
+        failed_labels = []
+        if isinstance(metrics, (list, tuple)):
+            for metric in metrics:
+                if isinstance(metric, dict) and metric.get("passed") is False:
+                    label = str(metric.get("label", "")).replace(" OFFSET", "").strip()
+                    if label:
+                        failed_labels.append(label)
+
+        if state == "FAIL":
+            cause = " + ".join(dict.fromkeys(failed_labels)) or "Outside recipe limits"
+        else:
+            cause = ""
+
+        recipe = getattr(getattr(self.engine, "recipe", None), "name", "")
+        try:
+            self.report_store.record_result(
+                result=state,
+                recipe=recipe,
+                cause=cause,
+                metrics=metrics or [],
+            )
+            self._report_terminal_recorded = True
+        except Exception:
+            # Reporting must never interrupt the live inspection loop.
+            pass
 
     def close(self):
         try:
