@@ -652,6 +652,21 @@ class ReportsPage(QWidget):
         timetable_lay.addWidget(timeline_note)
         root.addWidget(timetable_frame, 1)
 
+        event_log_frame = QFrame()
+        event_log_frame.setObjectName("reportPanel")
+        event_log_lay = QVBoxLayout(event_log_frame)
+        event_log_lay.addWidget(self._section_label("INSPECTION EVENT LOG"))
+        self.lbl_event_log_hint = QLabel("Newest first · confirmed Auto and Manual Test results only.")
+        self.lbl_event_log_hint.setStyleSheet("color: #8f9aad; font-size: 11px;")
+        event_log_lay.addWidget(self.lbl_event_log_hint)
+        self.table_event_log = QTableWidget(0, 4)
+        self._configure_table(self.table_event_log)
+        self.table_event_log.setMinimumHeight(280)
+        self.table_event_log.setMaximumHeight(410)
+        self.table_event_log.verticalHeader().setDefaultSectionSize(30)
+        event_log_lay.addWidget(self.table_event_log)
+        root.addWidget(event_log_frame)
+
         self.lbl_detail = QLabel("Reports are recorded from completed Auto and Manual Test inspections.")
         self.lbl_detail.setWordWrap(True)
         self.lbl_detail.setStyleSheet("font-size: 13px; color: #aeb8c8;")
@@ -666,6 +681,7 @@ class ReportsPage(QWidget):
         self.date_start.dateChanged.connect(self._on_custom_date_changed)
         self.date_end.dateChanged.connect(self._on_custom_date_changed)
         self.btn_refresh.clicked.connect(self.refresh)
+        self._set_table_headers()
         self._load_recipe_filter()
 
     def _section_label(self, text: str) -> QLabel:
@@ -700,6 +716,25 @@ class ReportsPage(QWidget):
         table.horizontalHeader().setStretchLastSection(True)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         table.setFocusPolicy(Qt.NoFocus)
+
+    def _set_table_headers(self):
+        self.table_breakdown.setHorizontalHeaderLabels(
+            [
+                self.localizer.tr("FAILURE CATEGORY"),
+                self.localizer.tr("POSITIVE (+)"),
+                self.localizer.tr("NEGATIVE (−)"),
+                self.localizer.tr("ZERO / OTHER"),
+                self.localizer.tr("TOTAL"),
+            ]
+        )
+        self.table_event_log.setHorizontalHeaderLabels(
+            [
+                self.localizer.tr("PROCESSED AT"),
+                self.localizer.tr("RECIPE"),
+                self.localizer.tr("RESULT"),
+                self.localizer.tr("FAILURE DETAIL"),
+            ]
+        )
 
     def _load_recipe_filter(self):
         current = self.cmb_recipe.currentData()
@@ -827,6 +862,7 @@ class ReportsPage(QWidget):
             summary = self.report_store.summary(start=start, end=end, recipe=recipe)
             causes = self.report_store.failure_causes(start=start, end=end, recipe=recipe)
             breakdown = self.report_store.failure_breakdown(start=start, end=end, recipe=recipe)
+            events = self.report_store.inspection_events(start=start, end=end, recipe=recipe)
             granularity = {
                 0: "hour",
                 1: "day",
@@ -854,6 +890,7 @@ class ReportsPage(QWidget):
             self.donut.set_counts(summary["pass"], summary["fail"])
             self.failure_chart.set_data(causes)
             self._fill_breakdown_table(breakdown)
+            self._fill_event_log(events)
             self.timeline_chart.set_data(timetable, granularity)
             if self.localizer.is_farsi:
                 total_text = self.localizer.digits(f"{summary['total']:,}")
@@ -889,6 +926,40 @@ class ReportsPage(QWidget):
                     item.setForeground(QColor("#ff6673"))
                 self.table_breakdown.setItem(row_index, column, item)
 
+    def _format_event_time(self, event: dict) -> str:
+        timestamp = event.get("timestamp")
+        if not isinstance(timestamp, datetime):
+            return str(event.get("timestamp_text") or "—")
+        date_text = self.localizer.format_date(timestamp, long=False)
+        time_text = self.localizer.digits(timestamp.strftime("%H:%M:%S.%f")[:-3])
+        return f"{date_text}  {time_text}"
+
+    def _fill_event_log(self, events: list[dict]):
+        self.table_event_log.setRowCount(len(events))
+        for row_index, event in enumerate(events):
+            result = str(event.get("result") or "").upper()
+            cause = str(event.get("cause") or "").strip()
+            cells = (
+                self._format_event_time(event),
+                str(event.get("recipe") or "—"),
+                self.localizer.tr(result),
+                self.localizer.tr(cause) if cause else "—",
+            )
+            for column, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, event.get("id"))
+                item.setToolTip(value)
+                item.setTextAlignment(
+                    Qt.AlignCenter if column == 2 else Qt.AlignLeft | Qt.AlignVCenter
+                )
+                if column == 2:
+                    item.setForeground(QColor("#38d27b") if result == "PASS" else QColor("#ff6673"))
+                elif column == 3 and result == "FAIL":
+                    item.setForeground(
+                        QColor("#bf7446") if cause.upper() == "BASEPLATE NOT FOUND" else QColor("#ffb0b8")
+                    )
+                self.table_event_log.setItem(row_index, column, item)
+
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh()
@@ -902,5 +973,6 @@ class ReportsPage(QWidget):
         self.date_start.setDate(current_start)
         self.date_end.setDate(current_end)
         self.localizer.apply_widget_text(self)
+        self._set_table_headers()
         self._load_recipe_filter()
         self.refresh()

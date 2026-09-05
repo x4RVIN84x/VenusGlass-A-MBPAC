@@ -1,16 +1,16 @@
 {
     "golden_image_path": "golden.png",
     "roi": [
-        178,
+        125,
         0,
-        992,
+        1056,
         720
     ],
     "expected_center": [
-        485.4393815012297,
-        368.7996320262741
+        532.0710834795215,
+        371.04005852508624
     ],
-    "expected_angle": 1.2004670602622973,
+    "expected_angle": 0.005667123309514641,
     "registration_roi": [
         133,
         270,
@@ -18,9 +18,9 @@
         452
     ],
     "baseplate_roi": [
-        178,
+        125,
         0,
-        992,
+        1056,
         720
     ],
     "inner_border_lines_used": [
@@ -79,31 +79,31 @@
     "expected_notch_frame": {
         "coord_model": "bottom_mid_local_frame_abs",
         "capture_source": "absolute_baseplate_center_in_live_notch_frame",
-        "dx": -9.657734789779637,
-        "dy": 171.1555959612951,
-        "frame_dx": -9.657734789779637,
-        "frame_dy": 171.1555959612951,
-        "sidewall_dx": -9.657734789779637,
-        "sidewall_dy": 171.1555959612951,
-        "relative_angle": 1.198476393416936,
-        "notch_angle": 0.001990666845361254,
+        "dx": -1.9355508397424073,
+        "dy": 169.04707947573482,
+        "frame_dx": -1.9355508397424073,
+        "frame_dy": 169.04707947573482,
+        "sidewall_dx": -1.9355508397424073,
+        "sidewall_dy": 169.04707947573482,
+        "relative_angle": 0.12668821052280926,
+        "notch_angle": -0.12102108721329463,
         "baseplate_center_abs": [
-            663.4393815012297,
-            368.7996320262741
+            657.0710834795215,
+            371.04005852508624
         ],
         "live_roi_at_capture": [
-            178,
+            125,
             0,
-            992,
+            1056,
             720
         ]
     },
-    "px_per_mm": 3.9562134088254446,
-    "mm_per_px": 0.25276695078410566,
-    "baseplate_px_per_mm": 3.9562134088254446,
+    "px_per_mm": 3.8362930077691457,
+    "mm_per_px": 0.2606683060899754,
+    "baseplate_px_per_mm": 3.8362930077691457,
     "baseplate_scale": {
-        "px_per_mm": 3.9562134088254446,
-        "mm_per_px": 0.25276695078410566,
+        "px_per_mm": 3.8362930077691457,
+        "mm_per_px": 0.2606683060899754,
         "baseplate_width_mm": 20.4,
         "baseplate_height_mm": 26.5,
         "baseplate_dimensions_mm": {
@@ -117,8 +117,8 @@
         "angle": 2.0
     },
     "tolerance_px": {
-        "x": 7.912426817650889,
-        "y": 7.912426817650889,
+        "x": 7.6725860155382914,
+        "y": 7.6725860155382914,
         "angle": 2.0
     }
 }

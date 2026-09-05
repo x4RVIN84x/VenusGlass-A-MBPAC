@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 import roi_stablizer
-from detector import detect_baseplate
+from detector import detect_baseplate, reset_baseplate_detection_hysteresis
 
 from hmi_app.core.models import Recipe, EngineSettings, QCFrameOutput
 from hmi_app.core.overlay import draw_stab_debug, draw_baseplate_overlay
@@ -77,6 +77,76 @@ def _angle_diff_deg(a, b):
         d += 360.0
 
     return float(d)
+
+
+def _line_orientation_deg(line):
+    """Return an undirected fitted-line orientation in the [0, 180) range."""
+    try:
+        vx, vy, _x0, _y0 = map(float, line)
+    except Exception:
+        return None
+
+    if not np.isfinite([vx, vy]).all() or float(np.hypot(vx, vy)) < 1e-9:
+        return None
+
+    return float(np.degrees(np.arctan2(vy, vx)) % 180.0)
+
+
+def _line_orientation_difference_deg(first, second):
+    a = _line_orientation_deg(first)
+    b = _line_orientation_deg(second)
+    if a is None or b is None:
+        return None
+    return abs(float((a - b + 90.0) % 180.0 - 90.0))
+
+
+def _current_notch_matches_golden(stab_info: Dict[str, Any]) -> bool:
+    """Require a fresh, glass-shaped dark-region notch fit before an alarm.
+
+    The fallback dot-line fit is useful for ROI stabilization, but it can also
+    find lines on unrelated objects.  A missing-baseplate condition is safety
+    critical, so only the normal dark-glass notch model with geometry close to
+    the recipe's golden fit is accepted as evidence that a glass is present.
+    """
+    if not isinstance(stab_info, dict):
+        return False
+
+    if stab_info.get("current_anchor_method") != "dark_region_bottom_frame":
+        return False
+
+    current_debug = stab_info.get("current_dark_debug")
+    if not isinstance(current_debug, dict) or not bool(current_debug.get("ok")):
+        return False
+
+    current = stab_info.get("current_notch_frame")
+    golden = stab_info.get("golden_notch_frame")
+    if not isinstance(current, dict) or not isinstance(golden, dict):
+        return False
+
+    try:
+        current_width = float(current["width"])
+        golden_width = float(golden["width"])
+        current_span = float(current["y_span"])
+        golden_span = float(golden["y_span"])
+    except Exception:
+        return False
+
+    if not np.isfinite([current_width, golden_width, current_span, golden_span]).all():
+        return False
+    if golden_width <= 1e-6 or golden_span <= 1e-6:
+        return False
+
+    width_ratio = current_width / golden_width
+    span_ratio = current_span / golden_span
+    if not (0.60 <= width_ratio <= 1.60 and 0.55 <= span_ratio <= 1.70):
+        return False
+
+    for name in ("left_line", "right_line", "bottom_line"):
+        difference = _line_orientation_difference_deg(current.get(name), golden.get(name))
+        if difference is None or difference > 18.0:
+            return False
+
+    return True
 
 
 def _safe_float(v, default=None):
@@ -690,6 +760,14 @@ class QCPreviewEngine:
         except Exception:
             pass
 
+        # Detector hysteresis is global because legacy entrypoints still call
+        # it directly.  Do not carry a previous recipe/capture's baseplate
+        # centre into a newly calibrated product.
+        try:
+            reset_baseplate_detection_hysteresis()
+        except Exception:
+            pass
+
     def get_raw_frame(self) -> Optional[np.ndarray]:
         return None if self._last_out is None else self._last_out.raw_bgr
 
@@ -777,6 +855,10 @@ class QCPreviewEngine:
             )
 
             self._stab_info = info if isinstance(info, dict) else {}
+            self._stab_info["glass_presence_checked_frame"] = int(self._frame_i)
+            self._stab_info["glass_presence_confirmed"] = _current_notch_matches_golden(
+                self._stab_info
+            )
 
             notch_frame = _extract_notch_frame(self._stab_info)
 
@@ -804,7 +886,7 @@ class QCPreviewEngine:
                 self._roi_live_poly = self._stab_info.get("roi_poly_current")
                 roi_mode = "fallback_stabilized_bbox"
 
-            # Final fallback: static baseplate ROI.
+            # Final fallback: static recipe ROI.
             else:
                 self._roi_live = self._apply_recipe_roi_offset(roi_cfg, cfg, W, H)
                 self._roi_live_poly = None
@@ -821,6 +903,13 @@ class QCPreviewEngine:
                 )
 
         crop, roi_live = safe_crop(raw, self._roi_live)
+
+        # Keep the timestamp of the last actual notch check separate from the
+        # current engine frame.  Consumers can reject a stale fit after the
+        # stabilizer has had a chance to inspect a new camera image.
+        if not isinstance(self._stab_info, dict):
+            self._stab_info = {}
+        self._stab_info["engine_frame_index"] = int(self._frame_i)
 
         # ----------------------------
         # Detector tuning

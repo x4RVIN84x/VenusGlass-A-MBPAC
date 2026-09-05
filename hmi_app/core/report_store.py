@@ -64,8 +64,12 @@ class ReportStore:
             )
 
     @staticmethod
-    def _timestamp(value: Optional[datetime] = None) -> str:
+    def _timestamp(value: Optional[datetime] = None, *, milliseconds: bool = False) -> str:
         value = value or datetime.now()
+        if milliseconds:
+            return value.isoformat(sep=" ", timespec="milliseconds")
+        # Query boundaries deliberately remain second-based so legacy rows
+        # stored without fractional seconds remain included at an exact bound.
         return value.replace(microsecond=0).isoformat(sep=" ")
 
     def record_result(
@@ -89,7 +93,7 @@ class ReportStore:
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    self._timestamp(timestamp),
+                    self._timestamp(timestamp, milliseconds=True),
                     str(recipe or ""),
                     result,
                     str(cause or ""),
@@ -371,3 +375,42 @@ class ReportStore:
                 "SELECT DISTINCT recipe FROM inspection_events WHERE recipe <> '' ORDER BY recipe"
             ).fetchall()
         return [str(row["recipe"]) for row in rows]
+
+    def inspection_events(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        recipe: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Return the confirmed per-glass inspection history, newest first."""
+        start_text, end_text = self._bounds(start, end)
+        recipe_clause, recipe_args = self._recipe_clause(recipe)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, timestamp, recipe, result, cause, metrics_json
+                FROM inspection_events
+                WHERE timestamp >= ? AND timestamp < ?
+                """ + recipe_clause + " ORDER BY timestamp DESC, id DESC",
+                [start_text, end_text, *recipe_args],
+            ).fetchall()
+
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            raw_timestamp = str(row["timestamp"] or "")
+            try:
+                timestamp = datetime.fromisoformat(raw_timestamp)
+            except ValueError:
+                timestamp = None
+            events.append(
+                {
+                    "id": int(row["id"]),
+                    "timestamp": timestamp,
+                    "timestamp_text": raw_timestamp,
+                    "recipe": str(row["recipe"] or ""),
+                    "result": str(row["result"] or "").upper(),
+                    "cause": str(row["cause"] or ""),
+                }
+            )
+        return events

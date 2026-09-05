@@ -42,6 +42,9 @@ class Recipe:
 @dataclass
 class EngineSettings:
     # ROI stabilization cadence
+    # Six frames keeps the fitted-notch ROI steady.  Running the relatively
+    # expensive line fit more often makes normal camera noise look like the
+    # baseplate is jumping between positions.
     stab_every_n: int = 6
     search_padding_px: int = 120
 
