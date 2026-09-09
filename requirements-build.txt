@@ -1,0 +1,4 @@
+# Includes runtime dependencies plus build-only tools.
+-r requirements.txt
+Nuitka>=2.7,<3.0
+Pillow>=10.0,<12.0

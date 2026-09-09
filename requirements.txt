@@ -1,0 +1,4 @@
+# Runtime dependencies for source development and the VG VISTA executable.
+numpy>=2.0,<3.0
+opencv-python>=4.10,<6.0
+PySide6>=6.8,<7.0

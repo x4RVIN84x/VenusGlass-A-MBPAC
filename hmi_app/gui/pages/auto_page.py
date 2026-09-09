@@ -29,6 +29,15 @@ from hmi_app.gui.image_view import ImageView
 from hmi_app.io.camera import OpenCVCamera
 from hmi_app.core.engine import QCPreviewEngine
 from hmi_app.core.report_store import ReportStore
+from hmi_app.plc import (
+    InspectionOutcome,
+    InspectionPlcService,
+    InspectionTelemetry,
+    LiveInspectionState,
+    PendingDecisionError,
+    build_decision_from_output,
+    build_live_telemetry,
+)
 
 
 class ConfidenceTriangle(QWidget):
@@ -204,6 +213,7 @@ class AutoPage(QWidget):
         engine: QCPreviewEngine,
         cam: OpenCVCamera,
         report_store: Optional[ReportStore] = None,
+        plc_service: Optional[InspectionPlcService] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -211,6 +221,7 @@ class AutoPage(QWidget):
         self.engine = engine
         self.cam = cam
         self.report_store = report_store
+        self.plc_service = plc_service
 
         self._running = False
         self._timer = QTimer(self)
@@ -264,6 +275,7 @@ class AutoPage(QWidget):
         self._run_button_timer.timeout.connect(self._toggle_run_button_pulse)
         self._summary_state = "READY"
         self._last_status_detail = "Select a product and press START"
+        self._last_plc_publish_error = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1620,6 +1632,7 @@ class AutoPage(QWidget):
             self._reset_decision_confidence()
             self._set_status("Status: CAMERA READ FAIL")
             self._set_inspection_cycle("WAITING")
+            self._publish_plc_state(LiveInspectionState.CAMERA_FAULT, "CAMERA READ FAIL")
             return
 
         if self.engine.recipe is None:
@@ -1628,6 +1641,7 @@ class AutoPage(QWidget):
             self._set_status("Status: NO PRODUCT LOADED (showing raw feed)")
             self._reset_alarm_state()
             self._set_inspection_cycle("WAITING")
+            self._publish_plc_state(LiveInspectionState.SETUP_REQUIRED, "NO PRODUCT LOADED")
             return
 
         self._set_engine_settings_from_ui()
@@ -1637,6 +1651,7 @@ class AutoPage(QWidget):
         except Exception as e:
             self._set_status(f"Status: ENGINE ERROR: {e}")
             self.view.set_bgr(frame)
+            self._publish_plc_state(LiveInspectionState.CAMERA_FAULT, "ENGINE ERROR")
             return
 
         display = out.overlay_bgr if out.overlay_bgr is not None else frame
@@ -1646,6 +1661,7 @@ class AutoPage(QWidget):
 
         confidence_percent, decision_confirmed = self._update_decision_confidence(out)
         alarm_on, alarm_elapsed = self._update_track_alarm(out)
+        self._publish_plc_telemetry(out, confidence_percent=confidence_percent)
         # Update the one-glass reporting latch first.  The missing-baseplate
         # monitor needs to know whether this is a new glass or a normal clear
         # interval after a completed inspection.
@@ -1660,6 +1676,90 @@ class AutoPage(QWidget):
             confidence_percent=confidence_percent,
             decision_confirmed=decision_confirmed,
         )
+
+    def _publish_plc_state(self, state: LiveInspectionState, text: str) -> None:
+        """Replace stale HMI telemetry when the camera/recipe is unavailable."""
+        if self.plc_service is None:
+            return
+        try:
+            self.plc_service.update_live_telemetry(InspectionTelemetry(state=state, state_text=text))
+            self._last_plc_publish_error = ""
+        except Exception as exc:
+            self._log_plc_publish_error("telemetry", exc)
+
+    def _publish_plc_telemetry(self, out, *, confidence_percent: int) -> None:
+        """Publish display telemetry without blocking the Qt camera timer."""
+        if self.plc_service is None:
+            return
+        try:
+            self.plc_service.update_live_telemetry(
+                build_live_telemetry(
+                    out,
+                    confidence_percent=confidence_percent,
+                    glass_present=self._glass_present_from_out(out),
+                    # A muted visual alarm must not make the PLC/HMI forget
+                    # that the fitted-notch gate confirmed a real, persistent
+                    # no-baseplate condition.
+                    baseplate_alarm_active=(
+                        self._baseplate_missing_candidate
+                        and self._baseplate_missing_elapsed >= float(self._track_alarm_after_s)
+                    ),
+                )
+            )
+            self._last_plc_publish_error = ""
+        except Exception as exc:
+            self._log_plc_publish_error("telemetry", exc)
+
+    def _publish_terminal_result(
+        self,
+        out,
+        *,
+        outcome: InspectionOutcome,
+        recipe: str,
+        report_event_id: int,
+        failure_cause: str = "",
+    ) -> None:
+        """Offer one durable result to the PLC acknowledgement handshake.
+
+        This never writes a conveyor command.  The PLC must acknowledge this
+        exact sequence and enforce its own safety and station-release logic.
+        """
+        if self.plc_service is None:
+            return
+        try:
+            decision = build_decision_from_output(
+                out,
+                outcome=outcome,
+                recipe=recipe,
+                report_event_id=report_event_id,
+                failure_cause=failure_cause,
+                confidence_percent=self._decision_confidence_percent,
+            )
+            self.plc_service.submit_terminal_result(decision)
+            self._last_plc_publish_error = ""
+        except PendingDecisionError as exc:
+            self._log_plc_publish_error("result pending", exc)
+        except Exception as exc:
+            self._log_plc_publish_error("result", exc)
+
+    def _log_plc_publish_error(self, context: str, exc: Exception) -> None:
+        """Avoid flooding the terminal if an optional transport is unhealthy."""
+        message = f"{context}: {exc}"
+        if message != self._last_plc_publish_error:
+            print(f"[HMI] PLC {message}")
+            self._last_plc_publish_error = message
+
+    def _plc_acknowledgement_pending(self) -> bool:
+        """Keep a completed station held until its PLC result is acknowledged."""
+        if self.plc_service is None:
+            return False
+        try:
+            return bool(self.plc_service.status().awaiting_acknowledgement)
+        except Exception as exc:
+            # An enabled handoff whose status cannot be read must fail closed:
+            # keep the one-glass latch armed instead of accepting another part.
+            self._log_plc_publish_error("status", exc)
+            return bool(getattr(getattr(self.plc_service, "config", None), "enabled", False))
 
     def _glass_present_from_out(self, out) -> bool:
         """Return whether the live notch geometry confirms a glass is present.
@@ -1716,7 +1816,7 @@ class AutoPage(QWidget):
 
         recipe = getattr(getattr(self.engine, "recipe", None), "name", "")
         try:
-            self.report_store.record_result(
+            report_event_id = self.report_store.record_result(
                 result="FAIL",
                 recipe=recipe,
                 cause="BASEPLATE NOT FOUND",
@@ -1726,6 +1826,13 @@ class AutoPage(QWidget):
             self._report_terminal_recorded = True
             self._mark_result_saved("FAIL", "BASEPLATE NOT FOUND")
             self._set_inspection_cycle("SAVED")
+            self._publish_terminal_result(
+                out,
+                outcome=InspectionOutcome.BASEPLATE_NOT_FOUND,
+                recipe=recipe,
+                report_event_id=report_event_id,
+                failure_cause="BASEPLATE NOT FOUND",
+            )
         except Exception:
             # Reporting must never interrupt the live inspection loop.
             pass
@@ -1746,6 +1853,13 @@ class AutoPage(QWidget):
             now = time.monotonic()
             if self._inspection_clear_since is None:
                 self._inspection_clear_since = now
+
+            if self._report_terminal_recorded and self._plc_acknowledgement_pending():
+                # The camera may already be clear, but a physical station must
+                # not be released/re-armed until the PLC has accepted the same
+                # terminal result sequence.
+                self._set_inspection_cycle("SAVED")
+                return
 
             # Do not re-arm on a one- or two-frame SEARCH flicker.  A new
             # glass cannot arrive within the configured clear-station gap.
@@ -1801,7 +1915,7 @@ class AutoPage(QWidget):
 
         recipe = getattr(getattr(self.engine, "recipe", None), "name", "")
         try:
-            self.report_store.record_result(
+            report_event_id = self.report_store.record_result(
                 result=state,
                 recipe=recipe,
                 cause=cause,
@@ -1810,6 +1924,13 @@ class AutoPage(QWidget):
             self._report_terminal_recorded = True
             self._mark_result_saved(state, cause)
             self._set_inspection_cycle("SAVED")
+            self._publish_terminal_result(
+                out,
+                outcome=InspectionOutcome.PASS if state == "PASS" else InspectionOutcome.FAIL,
+                recipe=recipe,
+                report_event_id=report_event_id,
+                failure_cause=cause,
+            )
         except Exception:
             # Reporting must never interrupt the live inspection loop.
             pass

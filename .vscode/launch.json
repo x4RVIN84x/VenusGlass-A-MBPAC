@@ -2,6 +2,19 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Run VG VISTA (QML)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "hmi_app.vista_app",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
             "name": "Run MBPAC HMI",
             "type": "debugpy",
             "request": "launch",

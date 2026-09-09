@@ -23,6 +23,7 @@ from hmi_app.core.recipe_manager import RecipeManager
 from hmi_app.core.engine import QCPreviewEngine
 from hmi_app.core.report_store import ReportStore
 from hmi_app.io.camera import OpenCVCamera
+from hmi_app.plc import InspectionPlcService
 
 from hmi_app.gui.pages.auto_page import AutoPage
 from hmi_app.gui.pages.calibration_page import CalibrationPage
@@ -63,6 +64,13 @@ class MainWindow(QMainWindow):
         app_data = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
         report_root = Path(app_data) if app_data else (repo_root / "output")
         self.report_store = ReportStore(report_root / "inspection_history.sqlite3")
+
+        # PLC networking stays deliberately disabled until Electrical provides
+        # the approved S7 DB/tag contract.  Auto Mode can already publish a
+        # safe semantic result, while any future network I/O remains off the
+        # camera/UI timer thread.
+        self.plc_service = InspectionPlcService.disabled()
+        self.plc_service.start()
 
         # Shared camera for all pages.
         self.cam = OpenCVCamera(index=0, width=1280, height=720, fps=30, use_dshow=True)
@@ -167,7 +175,12 @@ class MainWindow(QMainWindow):
             cam=self.cam,
             report_store=self.report_store,
         )
-        self.page_auto = AutoPage(engine=self.engine, cam=self.cam, report_store=self.report_store)
+        self.page_auto = AutoPage(
+            engine=self.engine,
+            cam=self.cam,
+            report_store=self.report_store,
+            plc_service=self.plc_service,
+        )
         self.page_cal.configurationChanged.connect(self.page_auto.refresh_recipe_summary)
         self.page_options = OptionsPage(
             auto_page=self.page_auto,
@@ -444,6 +457,12 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, "cam", None) is not None:
                 self.cam.release()
+        except Exception:
+            pass
+
+        try:
+            if getattr(self, "plc_service", None) is not None:
+                self.plc_service.stop()
         except Exception:
             pass
 

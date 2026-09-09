@@ -30,3 +30,11 @@ output/
 !recipes/**/*.jpg
 !recipes/**/*.jpeg
 !recipes/**/*.png
+
+# Shipped VG VISTA branding (the broad camera-capture rule above ignores PNGs).
+!hmi_app/qml/assets/**/*.png
+!hmi_app/qml/assets/**/*.ico
+
+# Local Windows packaging output.
+build/
+dist/
